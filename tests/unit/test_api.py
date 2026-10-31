@@ -176,6 +176,30 @@ def test_run_lifecycle_and_artifacts(client: TestClient):
     assert len(asst_data["cited_evidence_ids"]) > 0
     assert asst_data["provider_used"] == "deterministic"
 
+    # 9b. Remediation inquiry
+    asst_rem = client.post(
+        f"/api/runs/{run_id}/assistant",
+        json={"question": "What remediation actions should be taken first?", "llm": "off"},
+    )
+    assert asst_rem.status_code == 200
+    assert "remediation" in asst_rem.json()["answer"].lower()
+
+    # 9c. Limitations inquiry
+    asst_lim = client.post(
+        f"/api/runs/{run_id}/assistant",
+        json={"question": "What are the limitations of this diagnosis?", "llm": "off"},
+    )
+    assert asst_lim.status_code == 200
+    assert "limitations" in asst_lim.json()["answer"].lower()
+
+    # 9d. Competing causes inquiry
+    asst_comp = client.post(
+        f"/api/runs/{run_id}/assistant",
+        json={"question": "Why were competing alternative causes rejected?", "llm": "off"},
+    )
+    assert asst_comp.status_code == 200
+    assert "competing" in asst_comp.json()["answer"].lower() or "hypotheses" in asst_comp.json()["answer"].lower()
+
 
 def test_evaluation_quarantine_before_completion(client: TestClient):
     # Non-existent run

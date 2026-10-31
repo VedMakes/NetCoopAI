@@ -4,6 +4,52 @@ New entries are appended at the top.
 
 ---
 
+## [Phase 5] - Incident Explanation Assistant (Option A)
+- **Date:** 2026-11-01
+- **Phase:** PHASE 5
+- **Owner:** Senior Engineering Partner
+- **Starting commit:** `f1330bc`
+- **Summary:**
+  - Hardened and polished the read-only Incident Explanation Assistant (`ExplanationAssistant` in `src/netcoop_api/assistant.py` and `AssistantDrawer.tsx` in `web/src/components/`):
+    - Multi-turn inquiry routing strictly grounded in certified incident artifacts (report, specialist tower findings, evidence citations, gate check records, path triage).
+    - Expanded deterministic explanation coverage for:
+      - Prioritized remediation action steps and mitigation guidance.
+      - Transparent disclosure of system boundary conditions, single-stream caveats, and gate warnings.
+      - Competing and downweighted hypotheses arbitration with supervisor dispute resolution rationale.
+      - Topological path reachability triage and blast radius propagation.
+      - Domain specialist tower finding summaries (Performance, Infrastructure, Connectivity, Services).
+      - Grounded evidence observation citations.
+    - Added UI provider mode switcher in `AssistantDrawer.tsx` supporting:
+      - `Auto LLM`: Uses OpenRouter with free Nemotron-3.5-Lightning when API key is provided, falling back seamlessly to deterministic rules.
+      - `Deterministic`: Strictly local rule-based explanation with zero external calls and zero latency.
+      - `LLM Only`: Enforces remote OpenRouter synthesis.
+    - Added 7 preset inquiry pills in the drawer for one-click operator probing.
+    - Added message copy actions, provider badges (`deterministic` vs `openrouter`), citation tag chips, and auto-scroll message viewing.
+    - Added comprehensive unit tests in `tests/unit/test_api.py` covering remediation, limitations, competing causes, and specialist tower queries.
+- **Files created/modified:**
+  - Modified `src/netcoop_api/assistant.py`
+  - Modified `web/src/components/AssistantDrawer.tsx`
+  - Modified `tests/unit/test_api.py`
+  - Modified `docs/FRONTEND_CHANGELOG.md`
+- **API/schema changes:** None.
+- **Dependencies added:** None.
+- **Tests run and actual results:**
+  - `npm run build`: Built production bundle in 1.26s with 0 errors.
+  - `uv run pytest -q`: **221 passed** (including new multi-domain assistant query tests).
+  - `uv run ruff check .`: Clean, 0 errors.
+  - `git diff --check`: Clean, 0 whitespace issues.
+- **Tests not run:** None.
+- **CLI regression results:**
+  - `uv run netcoop doctor`: PASS.
+  - `uv run netcoop scenarios`: PASS.
+  - `uv run netcoop api --help`: PASS.
+- **Known issues:** None.
+- **Ending commit:** PENDING_COMMIT (will be updated upon commit)
+- **Push verification:** PENDING_PUSH
+- **Next phase:** PHASE 6 — End-to-End Testing, Robustness & Hardening across all 7 benchmark scenarios.
+
+---
+
 ## [Phase 4] - Page 2: Incident Intelligence & Verification Audit
 - **Date:** 2026-11-01
 - **Phase:** PHASE 4

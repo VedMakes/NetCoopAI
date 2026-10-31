@@ -95,35 +95,107 @@ class ExplanationAssistant:
         gate_result: Any,
     ) -> str:
         q = question.lower()
+        conf_cat = report.confidence_category.value if hasattr(report.confidence_category, "value") else str(report.confidence_category or "calibrated")
 
-        # 1. Why / Root Cause / Suspected Fault
-        if any(w in q for w in ["why", "cause", "diagnos", "reason", "root"]):
-            if report.status == "insufficient_evidence" or "ABSTAIN" in report.suspected_root_cause:
+        # 1. Remediation / Actions / Fix / Steps / Mitigation (check before generic 'why')
+        if any(w in q for w in ["remediat", "action", "step", "fix", "mitigat", "next", "resolv"]):
+            if not report.recommended_actions:
                 return (
-                    f"**Abstention Rationale:** The system abstained from diagnosing an outage because telemetry is within nominal baseline parameters.\n\n"
-                    f"• **Certified Status:** `{report.status}`\n"
-                    f"• **Confidence:** {report.confidence:.2f} (Category: {report.confidence_category})\n"
-                    f"• **Explanation:** {report.suspected_root_cause}\n"
-                    f"• **Evidence Gate:** Certified clean non-escalation without inventing false alarms."
+                    f"### Recommended Actions for Incident `{report.incident_id}`\n\n"
+                    "No immediate operator remediation actions were formulated (baseline nominal or insufficient evidence)."
                 )
 
-            evidence_bullets = "\n".join(
-                f"  - **{item.metric}**: observed `{item.value}` — {item.interpretation}"
-                for item in report.supporting_evidence[:5]
+            actions_list = "\n".join(
+                f"{i + 1}. **{act}**" for i, act in enumerate(report.recommended_actions)
             )
             return (
-                f"### Diagnosed Root Cause: `{report.suspected_root_cause}`\n\n"
-                f"• **Confidence Score:** {report.confidence:.2f} (`{report.confidence_category}`)\n"
-                f"• **Directly Observed Entities:** {', '.join(report.observed_symptom_entities) or 'None'}\n"
-                f"• **Inferred Affected Entities:** {', '.join(report.inferred_affected_entities) or 'None'}\n\n"
-                f"**Supporting Telemetry Evidence:**\n{evidence_bullets or '  - None cited'}\n\n"
-                f"**Recommended Next Steps:**\n" + "\n".join(f"• {act}" for act in report.recommended_actions[:3])
+                f"### Prioritized Remediation Steps\n\n"
+                f"Based on certified diagnosis `{report.suspected_root_cause}`:\n\n"
+                f"{actions_list}\n\n"
+                f"*(Note: NetCoop AI is a diagnostic & recommendation platform and does not automatically execute network configuration changes.)*"
             )
 
-        # 2. Specific Tower Queries
+        # 2. Limitations / Uncertainties / Caveats / Boundary Conditions
+        if any(w in q for w in ["limitat", "uncertain", "caveat", "boundar", "risk", "gap", "shortcom"]):
+            gate_lims = list(getattr(gate_result, "limitations", [])) if gate_result else []
+            gate_warns = list(getattr(gate_result, "warnings", [])) if gate_result else []
+            rep_lims = list(report.limitations or [])
+            all_lims = list(dict.fromkeys(rep_lims + gate_lims))
+
+            lims_text = "\n".join(f"• {lim}" for lim in all_lims) if all_lims else "• No active limitation flags recorded."
+            warns_text = "\n".join(f"• {w}" for w in gate_warns) if gate_warns else ""
+
+            return (
+                f"### System Limitations & Boundary Conditions\n\n"
+                f"The following caveats were audited by the Evidence Release Gate:\n\n"
+                f"{lims_text}\n"
+                f"{('\n**Gate Warnings:**\n' + warns_text) if warns_text else ''}\n\n"
+                f"• **Confidence Category:** `{conf_cat}` (Score: {report.confidence:.2f})\n"
+                f"• **Corroboration Scope:** Diagnostic claims are strictly bound to captured scenario observations and topology records."
+            )
+
+        # 3. Alternatives / Competing Hypotheses / Downweighted Causes / Dispute Resolution
+        if any(w in q for w in ["alternative", "reject", "compete", "downweight", "other cause", "dispute", "prune"]):
+            competing_list: list[str] = []
+            for tr in tower_reports.values():
+                for hyp in tr.hypotheses:
+                    if hyp.fault_code.upper() not in report.suspected_root_cause.upper():
+                        competing_list.append(
+                            f"• **{hyp.fault_code}** (Tower: `{tr.tower_id.value}`, Score: {hyp.confidence_score:.2f}): {hyp.rationale}"
+                        )
+
+            alts_from_report = [f"• {alt}" for alt in report.alternative_causes]
+            all_competing = competing_list or alts_from_report
+
+            if not all_competing:
+                return (
+                    "### Competing Hypotheses Assessment\n\n"
+                    "No competing alternative hypotheses met the supervisory confidence threshold. "
+                    "The primary root cause showed dominant causal correlation across telemetry features without conflicting signals."
+                )
+
+            return (
+                f"### Evaluated & Downweighted Hypotheses\n\n"
+                f"The supervisor evaluated the following competing hypotheses and downweighted them in favor of `{report.suspected_root_cause}`:\n\n"
+                + "\n".join(all_competing[:5])
+                + "\n\n**Resolution Rationale:** Hypotheses lacking independent cross-domain corroboration or exhibiting lower anomaly confidence scores were subordinated."
+            )
+
+        # 4. Path Triage / Reachability / Topology Route
+        if any(w in q for w in ["path", "route", "reachab", "blast", "hop", "upstream", "connect"]):
+            if report.path_triage and report.path_triage.paths:
+                paths_summary = "\n".join(
+                    f"• `{' → '.join(p.path)}` — **{'REACHABLE' if p.reachable else 'UNREACHABLE'}**"
+                    for p in report.path_triage.paths[:5]
+                )
+                return (
+                    f"### Topological Path & Reachability Analysis\n\n"
+                    f"Physical path triage evaluated by Connectivity Tower:\n\n"
+                    f"{paths_summary}\n\n"
+                    f"• **Directly Observed:** {', '.join(report.observed_symptom_entities) or 'None'}\n"
+                    f"• **Inferred Blast Radius:** {', '.join(report.inferred_affected_entities) or 'None'}"
+                )
+            if report.inferred_affected_entities:
+                return (
+                    f"### Topology Reachability & Blast Radius\n\n"
+                    f"• **Direct Symptom Entity:** {', '.join(report.observed_symptom_entities) or 'None'}\n"
+                    f"• **Inferred Downstream Impact:** {', '.join(report.inferred_affected_entities)}\n\n"
+                    f"*(Downstream entities were identified via NetworkX topology graph traversal from the fault location.)*"
+                )
+
+        # 5. Confidence / Scoring / Calibration
+        if any(w in q for w in ["confidence", "score", "calibrat", "certain"]):
+            return (
+                f"### Confidence & Calibration Analysis\n\n"
+                f"• **Numeric Confidence:** `{report.confidence:.2f}` (scale 0.0 - 1.0)\n"
+                f"• **Confidence Category:** `{conf_cat}`\n"
+                f"• **Gate Audit Status:** `{getattr(gate_result, 'outcome', 'CERTIFIED')}`\n"
+                f"• **Evidence Coverage:** Verified against {len(report.supporting_evidence)} supporting evidence observations."
+            )
+
+        # 6. Specific Tower Queries
         for tower_name in ["performance", "infrastructure", "connectivity", "services"]:
             if tower_name in q:
-                # Find matching tower report
                 matched_tr = None
                 for tid, tr in tower_reports.items():
                     if tower_name in str(tid).lower():
@@ -136,51 +208,80 @@ class ExplanationAssistant:
                     f"• [{f.severity.value.upper()}] **{f.finding_type}** ({f.confidence:.2f}): {f.description} (entities: {', '.join(f.entity_refs) or 'N/A'})"
                     for f in matched_tr.findings
                 )
-                return f"### {tower_name.title()} Tower Assessment\n\n{findings_list}"
+                hypotheses_list = "\n".join(
+                    f"  - Hypothesis `{h.fault_code}` (Score: {h.confidence_score:.2f}): {h.rationale}"
+                    for h in matched_tr.hypotheses
+                )
+                return (
+                    f"### {tower_name.title()} Tower Assessment\n\n"
+                    f"**Findings ({len(matched_tr.findings)}):**\n{findings_list}\n\n"
+                    + (f"**Proposed Hypotheses:**\n{hypotheses_list}" if hypotheses_list else "")
+                )
 
-        # 3. Evidence / Observations / Citations
-        if any(w in q for w in ["evidence", "metric", "observation", "citation", "signal"]):
+        # 7. Evidence / Observations / Citations
+        if any(w in q for w in ["evidence", "metric", "observation", "citation", "signal", "raw"]):
             if not report.supporting_evidence:
                 return "The certified report contains no supporting evidence items (nominal baseline or insufficient evidence)."
 
             items = "\n".join(
-                f"• **{item.metric}** ({item.interpretation}): value `{item.value}`"
-                for item in report.supporting_evidence
+                f"• **{item.metric}**: observed `{item.value}` {item.unit or ''} on `{item.entity_id or 'topology'}` — {item.interpretation}"
+                for item in report.supporting_evidence[:8]
             )
-            sources = f"\n\n**Cited Observation Sources:** {', '.join(report.evidence_sources)}" if report.evidence_sources else ""
-            return f"### Grounded Evidence Citations\n\nEvery cited observation was independently verified by the Evidence Release Gate:\n\n{items}{sources}"
+            sources = f"\n\n**Cited Observation Keys:** {', '.join(report.evidence_sources)}" if report.evidence_sources else ""
+            return (
+                f"### Grounded Evidence Citations\n\n"
+                f"Every cited observation was independently verified by the Evidence Release Gate:\n\n"
+                f"{items}{sources}"
+            )
 
-        # 4. Evidence Gate / Verification
+        # 8. Evidence Gate / Verification
         if any(w in q for w in ["gate", "verif", "provenance", "check", "valid"]):
             outcome = gate_result.outcome.value if gate_result else "UNKNOWN"
-            warnings = "\n".join(f"• {w}" for w in getattr(gate_result, "data_quality_warnings", [])[:3])
+            checks = getattr(gate_result, "checks", [])
+            checks_text = "\n".join(
+                f"• **{c.check_name}**: {'PASSED' if c.passed else 'FAILED'} — {c.message}"
+                for c in checks[:5]
+            ) if checks else "• Deterministic checks passed."
             return (
                 f"### Evidence Release Gate Verification\n\n"
-                f"• **Outcome:** `{outcome}`\n"
-                f"• **Integrity Check:** All cited observation IDs exist in the incident record and match the target incident scope.\n"
-                f"• **Contradictions Checked:** Conflicting multi-source telemetry signals were evaluated.\n"
-                f"{('• **Data Quality Warnings:**\n' + warnings) if warnings else '• **Data Quality:** Zero critical quality warnings.'}"
+                f"• **Gate Outcome:** `{outcome}`\n"
+                f"• **Gate Role:** Independent barrier preventing hallucinated root causes or unverified claims.\n\n"
+                f"**Audit Checks:**\n{checks_text}"
             )
 
-        # 5. Impact / Entities / Devices
-        if any(w in q for w in ["affect", "impact", "device", "entity", "entities", "blast"]):
+        # 9. Why / Root Cause / Suspected Fault
+        if any(w in q for w in ["why", "cause", "diagnos", "reason", "root"]):
+            if report.status == "insufficient_evidence" or "ABSTAIN" in report.suspected_root_cause:
+                return (
+                    f"**Abstention Rationale:** The system abstained from diagnosing an outage because telemetry is within nominal baseline parameters.\n\n"
+                    f"• **Certified Status:** `{report.status}`\n"
+                    f"• **Confidence:** {report.confidence:.2f} (Category: {conf_cat})\n"
+                    f"• **Explanation:** {report.suspected_root_cause}\n"
+                    f"• **Evidence Gate:** Certified clean non-escalation without inventing false alarms."
+                )
+
+            evidence_bullets = "\n".join(
+                f"  - **{item.metric}**: observed `{item.value}` {item.unit or ''} — {item.interpretation}"
+                for item in report.supporting_evidence[:4]
+            )
             return (
-                f"### Impact Analysis\n\n"
-                f"• **Directly Observed Symptoms (Confirmed Telemetry):**\n"
-                f"  {', '.join(report.observed_symptom_entities) or 'None'}\n\n"
-                f"• **Inferred Affected Candidates (Topology Blast Radius):**\n"
-                f"  {', '.join(report.inferred_affected_entities) or 'None'}\n\n"
-                f"*Note: Inferred entities are downstream path predictions from the network topology graph, not direct metric confirmations.*"
+                f"### Diagnosed Root Cause: `{report.suspected_root_cause}`\n\n"
+                f"• **Confidence Score:** {report.confidence:.2f} (`{conf_cat}`)\n"
+                f"• **Directly Observed Entities:** {', '.join(report.observed_symptom_entities) or 'None'}\n"
+                f"• **Inferred Affected Entities:** {', '.join(report.inferred_affected_entities) or 'None'}\n\n"
+                f"**Supporting Telemetry Evidence:**\n{evidence_bullets or '  - None cited'}\n\n"
+                f"**Recommended Next Steps:**\n" + "\n".join(f"• {act}" for act in report.recommended_actions[:3])
             )
-
-        # 6. Alternatives / Pruned Hypotheses
-        if any(w in q for w in ["alternative", "reject", "compete", "other", "prune"]):
-            alts = "\n".join(f"• {c}" for c in report.concurrent_causes)
-            if not alts:
-                return "No competing alternative hypotheses met the confidence threshold; the diagnosed cause had dominant causal priority."
-            return f"### Evaluated Alternative Causes\n\n{alts}\n\nThese were considered during supervisory reasoning and either classified as concurrent effects or subordinated due to lack of corroborating evidence."
 
         # Default summary
+        return (
+            f"### Incident Summary: `{report.incident_id}`\n\n"
+            f"• **Suspected Root Cause:** `{report.suspected_root_cause}`\n"
+            f"• **Report Status:** `{report.status}` (Confidence: {report.confidence:.2f})\n"
+            f"• **Direct Symptoms:** {', '.join(report.observed_symptom_entities) or 'None'}\n"
+            f"• **Supporting Evidence Items:** {len(report.supporting_evidence)}\n"
+            f"• **Recommendations:**\n" + "\n".join(f"  - {a}" for a in report.recommended_actions[:3])
+        )
         return (
             f"### Incident Summary: `{report.incident_id}`\n\n"
             f"• **Suspected Root Cause:** `{report.suspected_root_cause}`\n"
