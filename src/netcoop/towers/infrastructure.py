@@ -307,6 +307,9 @@ class InfrastructureTower:
     def capabilities(self) -> list[TowerCapability]:
         return self._capabilities
 
+    def get_capabilities(self) -> list[TowerCapability]:
+        return self.capabilities
+
     def analyze_incident(
         self, incident_id: str, observations: list[CanonicalObservation] | None = None
     ) -> TowerReport:
@@ -389,3 +392,5 @@ class InfrastructureTower:
             result={"analysis": "Task executed by infrastructure tower"},
             completed_at=now,
         )
+
+    handle_task = execute_task

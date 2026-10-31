@@ -2,17 +2,17 @@
 
 > Update this file at every phase start, implementation handoff, review verdict and blocker. `docs/COLLAB_LOG.md` is the append-only history; this file is only the current-state summary.
 
-- **Current phase:** Phase 4
-- **Phase title:** Connectivity and services/configuration engines
+- **Current phase:** Phase 5
+- **Phase title:** Integration fabric and tower controllers
 - **Status:** `AWAITING_REVIEW`
-- **Implementation owner:** Friend A
-- **Reviewer:** Friend B
+- **Implementation owner:** Friend B
+- **Reviewer:** Friend A
 - **Shared branch:** `hackathon/team-integration`
-- **Last accepted phase:** Phase 3 (VERIFIED by Friend A)
-- **Latest implementation commit:** `ad466f1`
-- **Latest review commit:** Review of Phase 3 completed
+- **Last accepted phase:** Phase 4 (VERIFIED by Friend B)
+- **Latest implementation commit:** (pending commit)
+- **Latest review commit:** Review of Phase 4 completed
 - **Blocking issues:** None recorded
-- **Next phase:** Phase 5, owned by Friend B
+- **Next phase:** Phase 6, owned by Friend A
 
 ## Status meanings
 
@@ -26,8 +26,8 @@
 
 ## Current phase checklist
 
-- [x] Owner confirmed session designation (`TEAMMATE_ID = A`).
-- [x] Reviewer independently verified Phase 3 handoff.
+- [x] Owner confirmed session designation (`TEAMMATE_ID = B`).
+- [x] Reviewer independently verified Phase 4 handoff.
 - [x] Owner inspected repository, tools, and docs.
 - [x] Shared branch `hackathon/team-integration` active.
 - [x] Implementation completed.
@@ -47,8 +47,8 @@
 | 1 | Friend B | Friend A | VERIFIED |
 | 2 | Friend A | Friend B | VERIFIED |
 | 3 | Friend B | Friend A | VERIFIED |
-| 4 | Friend A | Friend B | AWAITING_REVIEW |
-| 5 | Friend B | Friend A | NOT_STARTED |
+| 4 | Friend A | Friend B | VERIFIED |
+| 5 | Friend B | Friend A | AWAITING_REVIEW |
 | 6 | Friend A | Friend B | NOT_STARTED |
 | 7 | Friend B | Friend A | NOT_STARTED |
 | 8 | Friend A | Friend B | NOT_STARTED |

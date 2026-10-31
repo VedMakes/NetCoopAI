@@ -318,6 +318,10 @@ class ServicesTower:
         profile = CapabilityRegistry.get_profile(self.tower_id)
         return profile.capabilities if profile else []
 
+    @property
+    def capabilities(self) -> list[TowerCapability]:
+        return self.get_capabilities()
+
     def analyze_incident(
         self,
         incident_id: str,
@@ -424,3 +428,5 @@ class ServicesTower:
             warnings=[f"Unsupported capability: {cap}"],
             completed_at=now,
         )
+
+    execute_task = handle_task

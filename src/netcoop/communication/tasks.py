@@ -1,11 +1,14 @@
 """Investigation task contracts and lifecycle state-machine validation."""
 
+from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from netcoop.communication.events import EventEnvelope
 from netcoop.models.enums import TaskStatus, TowerId
+from netcoop.utils.id_generator import generate_id
 
 
 def _ensure_utc(dt: datetime) -> datetime:
@@ -147,3 +150,237 @@ class TaskResult(BaseModel):
     @classmethod
     def validate_utc(cls, v: datetime) -> datetime:
         return _ensure_utc(v)
+
+
+TaskHandler = Callable[[InvestigationTask], TaskResult]
+
+
+class TaskDispatcher:
+    """Dispatcher for supervisor-authorized investigation tasks with persistent lifecycle management."""
+
+    def __init__(
+        self,
+        repository: Any | None = None,
+        event_bus: Any | None = None,
+        registry: Any | None = None,
+    ) -> None:
+        self.repo = repository
+        self.event_bus = event_bus
+        self.registry = registry
+        # Map (assignee_str, capability_str) -> TaskHandler
+        self._handlers: dict[tuple[str, str], TaskHandler] = {}
+        # In-memory store fallback if repo is None
+        self._tasks: dict[str, InvestigationTask] = {}
+        self._results: dict[str, TaskResult] = {}
+
+    def register_handler(
+        self, tower_id: TowerId | str, capability: str, handler: TaskHandler
+    ) -> None:
+        t_id = tower_id.value.lower() if isinstance(tower_id, TowerId) else tower_id.lower()
+        self._handlers[(t_id, capability)] = handler
+
+    def create_task(
+        self,
+        requester: str,
+        assignee: TowerId | str,
+        capability: str,
+        objective: dict[str, Any],
+        constraints: dict[str, Any] | None = None,
+        deadline_at: datetime | None = None,
+        parent_task_id: str | None = None,
+        expected_result_schema: str = "netcoop://schemas/tasks/generic-result/1.0",
+        incident_id: str = "INC-ACTIVE",
+    ) -> InvestigationTask:
+        """Creates and persists an investigation task. ONLY 'supervisor' may call this."""
+        if requester != "supervisor":
+            raise PermissionError(
+                f"Unauthorized task creation attempt by '{requester}'. "
+                f"Only 'supervisor' may create persistent investigation tasks."
+            )
+
+        assignee_id = assignee if isinstance(assignee, TowerId) else TowerId(assignee.lower())
+        now = datetime.now(timezone.utc)
+        task_id = generate_id("TASK")
+
+        task = InvestigationTask(
+            task_id=task_id,
+            incident_id=incident_id,
+            parent_task_id=parent_task_id,
+            requester=requester,
+            assignee=assignee_id,
+            capability=capability,
+            objective=objective,
+            constraints=constraints or {},
+            expected_result_schema=expected_result_schema,
+            status=TaskStatus.CREATED,
+            counter_proposal_count=0,
+            created_at=now,
+            updated_at=now,
+            deadline_at=deadline_at,
+        )
+
+        self._save_task(task)
+
+        if self.event_bus is not None:
+            self._publish_task_event("task.created", task)
+
+        return task
+
+    def get(self, task_id: str) -> InvestigationTask:
+        if self.repo is not None:
+            task = self.repo.get_task_by_id(task_id)
+            if task is not None:
+                return task
+        elif task_id in self._tasks:
+            return self._tasks[task_id]
+        raise KeyError(f"Investigation task '{task_id}' not found.")
+
+    def accept(self, task_id: str) -> InvestigationTask:
+        task = self.get(task_id)
+        updated = task.transition_to(TaskStatus.ACCEPTED)
+        self._save_task(updated)
+        if self.event_bus is not None:
+            self._publish_task_event("task.accepted", updated)
+        return updated
+
+    def decline(self, task_id: str, reason: str) -> InvestigationTask:
+        task = self.get(task_id)
+        updated = task.transition_to(TaskStatus.DECLINED).model_copy(
+            update={"error_detail": reason}
+        )
+        self._save_task(updated)
+        if self.event_bus is not None:
+            self._publish_task_event("task.declined", updated)
+        return updated
+
+    def counter_propose(
+        self, task_id: str, revised_constraints: dict[str, Any], reason: str
+    ) -> InvestigationTask:
+        task = self.get(task_id)
+        updated = task.transition_to(TaskStatus.COUNTER_PROPOSED).model_copy(
+            update={
+                "constraints": revised_constraints,
+                "error_detail": reason,
+            }
+        )
+        self._save_task(updated)
+        if self.event_bus is not None:
+            self._publish_task_event("task.counter_proposed", updated)
+        return updated
+
+    def cancel(self, task_id: str, reason: str) -> InvestigationTask:
+        task = self.get(task_id)
+        updated = task.transition_to(TaskStatus.CANCELLED).model_copy(
+            update={"error_detail": reason}
+        )
+        self._save_task(updated)
+        if self.event_bus is not None:
+            self._publish_task_event("task.cancelled", updated)
+        return updated
+
+    def execute(self, task_id: str) -> TaskResult:
+        task = self.get(task_id)
+        now = datetime.now(timezone.utc)
+
+        # 1. State transition
+        if task.status == TaskStatus.CREATED:
+            task = self.accept(task_id)
+
+        if task.status != TaskStatus.ACCEPTED:
+            raise InvalidTaskTransitionError(
+                f"Cannot execute task in status '{task.status.value}'. Must be in ACCEPTED state."
+            )
+
+        running_task = task.transition_to(TaskStatus.RUNNING)
+        self._save_task(running_task)
+
+        # 2. Handler lookup
+        assignee_str = running_task.assignee.value.lower()
+        handler = self._handlers.get((assignee_str, running_task.capability))
+        if handler is None:
+            escalated_task = running_task.transition_to(TaskStatus.ESCALATED).model_copy(
+                update={"error_detail": f"No handler registered for {assignee_str}/{running_task.capability}"}
+            )
+            self._save_task(escalated_task)
+            result = TaskResult(
+                result_id=generate_id("RES"),
+                task_id=task_id,
+                assignee=running_task.assignee,
+                status=TaskStatus.ESCALATED,
+                result_schema=running_task.expected_result_schema,
+                warnings=[f"Capability '{running_task.capability}' not supported by assignee."],
+                completed_at=now,
+            )
+            self._save_result(result)
+            if self.event_bus is not None:
+                self._publish_task_event("task.escalated", escalated_task)
+            return result
+
+        # 3. Execution with failure safety
+        try:
+            result = handler(running_task)
+            terminal_status = result.status if result.status.is_terminal else TaskStatus.COMPLETED
+            completed_task = running_task.transition_to(terminal_status).model_copy(
+                update={"result_id": result.result_id}
+            )
+            self._save_task(completed_task)
+            self._save_result(result)
+            if self.event_bus is not None:
+                self._publish_task_event("task.completed", completed_task)
+            return result
+        except Exception as exc:
+            failed_task = running_task.transition_to(TaskStatus.FAILED).model_copy(
+                update={"error_code": "EXECUTION_ERROR", "error_detail": str(exc)}
+            )
+            self._save_task(failed_task)
+            result = TaskResult(
+                result_id=generate_id("RES"),
+                task_id=task_id,
+                assignee=running_task.assignee,
+                status=TaskStatus.FAILED,
+                result_schema=running_task.expected_result_schema,
+                warnings=[f"Execution failed: {exc}"],
+                completed_at=datetime.now(timezone.utc),
+            )
+            self._save_result(result)
+            if self.event_bus is not None:
+                self._publish_task_event("task.failed", failed_task)
+            return result
+
+    def _save_task(self, task: InvestigationTask) -> None:
+        if self.repo is not None:
+            existing = self.repo.get_task_by_id(task.task_id)
+            if existing is None:
+                self.repo.insert_task(task)
+            else:
+                self.repo.update_task(task)
+        else:
+            self._tasks[task.task_id] = task
+
+    def _save_result(self, result: TaskResult) -> None:
+        if self.repo is not None:
+            self.repo.insert_task_result(result)
+        else:
+            self._results[result.task_id] = result
+
+    def _publish_task_event(self, event_type: str, task: InvestigationTask) -> None:
+        if self.event_bus is None:
+            return
+        now = datetime.now(timezone.utc)
+        evt = EventEnvelope(
+            id=generate_id("EVT"),
+            source=f"netcoop/{task.assignee.value}",
+            type=event_type,
+            subject=task.task_id,
+            time=now,
+            dataschema="netcoop://schemas/events/task-lifecycle/1.0",
+            correlationid=task.incident_id,
+            causationid=task.task_id,
+            data={
+                "task_id": task.task_id,
+                "status": task.status.value,
+                "capability": task.capability,
+                "assignee": task.assignee.value,
+            },
+        )
+        self.event_bus.publish(evt)
