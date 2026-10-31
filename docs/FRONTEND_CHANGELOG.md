@@ -44,8 +44,8 @@ New entries are appended at the top.
   - `uv run netcoop scenarios`: PASS.
   - `uv run netcoop api --help`: PASS.
 - **Known issues:** None.
-- **Ending commit:** PENDING_COMMIT (will be updated upon commit)
-- **Push verification:** PENDING_PUSH
+- **Ending commit:** `ad2fb35`
+- **Push verification:** Pushed and verified at `origin/feature/netcoop-dashboard` (commit `ad2fb35`).
 - **Next phase:** PHASE 6 — End-to-End Testing, Robustness & Hardening across all 7 benchmark scenarios.
 
 ---
