@@ -385,7 +385,7 @@ def get_rca_provider(
         return DeterministicRCAProvider()
 
     import os
-    resolved_key = api_key or os.environ.get("OPENROUTER_API_KEY", "")
+    resolved_key = api_key if api_key is not None else os.environ.get("OPENROUTER_API_KEY", "")
 
     if mode == "on":
         if not resolved_key:

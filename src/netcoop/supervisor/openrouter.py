@@ -24,7 +24,7 @@ from netcoop.utils.id_generator import generate_id
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_FREE_MODEL = "meta-llama/llama-3.3-70b-instruct:free"
+DEFAULT_FREE_MODEL = "nvidia/nemotron-3.5-lightning:free"
 DEFAULT_OPENROUTER_URL = "https://openrouter.ai/api/v1"
 
 
@@ -39,9 +39,9 @@ class OpenRouterProvider:
         timeout_seconds: float = 30.0,
     ) -> None:
         load_dotenv()
-        self.api_key = api_key or os.environ.get("OPENROUTER_API_KEY", "")
-        self.model = model or os.environ.get("OPENROUTER_MODEL", DEFAULT_FREE_MODEL)
-        self.base_url = (base_url or os.environ.get("OPENROUTER_BASE_URL", DEFAULT_OPENROUTER_URL)).rstrip("/")
+        self.api_key = api_key if api_key is not None else os.environ.get("OPENROUTER_API_KEY", "")
+        self.model = model if model is not None else os.environ.get("OPENROUTER_MODEL", DEFAULT_FREE_MODEL)
+        self.base_url = (base_url if base_url is not None else os.environ.get("OPENROUTER_BASE_URL", DEFAULT_OPENROUTER_URL)).rstrip("/")
         self.timeout_seconds = timeout_seconds
         self.fallback = DeterministicRCAProvider()
 
