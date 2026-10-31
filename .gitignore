@@ -60,3 +60,7 @@ Thumbs.db
 *.swo
 *~
 
+# Frontend Web Build
+web/node_modules/
+web/dist/
+

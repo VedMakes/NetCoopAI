@@ -23,6 +23,14 @@ def test_root_endpoint(client: TestClient):
     data = response.json()
     assert data["name"] == "NetCoop AI API"
     assert data["status"] == "online"
+    assert "dashboard_url" in data
+
+
+def test_ui_endpoint(client: TestClient):
+    response = client.get("/ui/")
+    # If built, returns HTML
+    if response.status_code == 200:
+        assert "NetCoop AI" in response.text
 
 
 def test_health_endpoint(client: TestClient):

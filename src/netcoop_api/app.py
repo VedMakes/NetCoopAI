@@ -50,12 +50,20 @@ def create_app() -> FastAPI:
     app.include_router(runs.router)
     app.include_router(assistant.router)
 
+    # Mount compiled web frontend if available
+    from pathlib import Path
+    web_dist = Path(__file__).resolve().parents[3] / "web" / "dist"
+    if web_dist.is_dir():
+        from fastapi.staticfiles import StaticFiles
+        app.mount("/ui", StaticFiles(directory=str(web_dist), html=True), name="ui")
+
     @app.get("/")
     def root():
         return {
             "name": "NetCoop AI API",
             "status": "online",
             "docs_url": "/docs",
+            "dashboard_url": "/ui" if web_dist.is_dir() else None,
         }
 
     return app

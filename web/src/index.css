@@ -1,0 +1,46 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-noc-bg text-noc-text;
+    color-scheme: dark;
+  }
+}
+
+/* Custom Scrollbar for NOC Panels */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #0B0D14;
+}
+::-webkit-scrollbar-thumb {
+  background: #242C47;
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #3B4668;
+}
+
+/* Animated Network Link Pulse */
+@keyframes linkPulse {
+  0% {
+    stroke-dashoffset: 24;
+  }
+  100% {
+    stroke-dashoffset: 0;
+  }
+}
+
+.animate-link-pulse {
+  stroke-dasharray: 6 6;
+  animation: linkPulse 1.2s linear infinite;
+}
+
+.animate-link-congested {
+  stroke-dasharray: 4 4;
+  animation: linkPulse 0.4s linear infinite;
+}
