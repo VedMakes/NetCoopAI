@@ -4,12 +4,12 @@
 
 - **Current phase:** Phase 8
 - **Phase title:** Benchmarking, evaluation and hardening
-- **Status:** `IN_PROGRESS`
+- **Status:** `AWAITING_REVIEW`
 - **Implementation owner:** Friend A
 - **Reviewer:** Friend B
 - **Shared branch:** `hackathon/team-integration`
 - **Last accepted phase:** Phase 7 (VERIFIED by Friend A)
-- **Latest implementation commit:** None (Phase 8 in progress)
+- **Latest implementation commit:** (pending commit)
 - **Latest review commit:** Review of Phase 7 completed
 - **Blocking issues:** None recorded
 - **Next phase:** Final project release
@@ -30,9 +30,9 @@
 - [x] Reviewer independently verified Phase 7 handoff.
 - [x] Owner inspected repository, tools, and docs.
 - [x] Shared branch `hackathon/team-integration` active.
-- [ ] Implementation completed.
-- [ ] Required tests run and recorded.
-- [ ] Owner appended implementation handoff to `COLLAB_LOG.md`.
+- [x] Implementation completed.
+- [x] Required tests run and recorded.
+- [x] Owner appended implementation handoff to `COLLAB_LOG.md`.
 - [ ] Owner created commit on shared branch.
 - [ ] Reviewer pulled exact commit.
 - [ ] Reviewer independently ran checks.
@@ -51,4 +51,4 @@
 | 5 | Friend B | Friend A | VERIFIED |
 | 6 | Friend A | Friend B | VERIFIED |
 | 7 | Friend B | Friend A | VERIFIED |
-| 8 | Friend A | Friend B | IN_PROGRESS |
+| 8 | Friend A | Friend B | AWAITING_REVIEW |

@@ -369,6 +369,39 @@ class FakeLLMProvider:
         return proposal, manifest
 
 
+def get_rca_provider(
+    llm_mode: str = "off",
+    api_key: str | None = None,
+    model: str | None = None,
+) -> RCAProvider:
+    """Factory creating the appropriate RCAProvider based on LLM mode and available credentials."""
+    from netcoop.supervisor.openrouter import OpenRouterProvider
+    from netcoop.utils.env import load_dotenv
+
+    load_dotenv()
+    mode = llm_mode.lower()
+
+    if mode == "off":
+        return DeterministicRCAProvider()
+
+    import os
+    resolved_key = api_key or os.environ.get("OPENROUTER_API_KEY", "")
+
+    if mode == "on":
+        if not resolved_key:
+            raise ValueError(
+                "LLM mode 'on' was requested, but OPENROUTER_API_KEY was not found in environment or .env file."
+            )
+        return OpenRouterProvider(api_key=resolved_key, model=model)
+
+    if mode == "auto":
+        if resolved_key:
+            return OpenRouterProvider(api_key=resolved_key, model=model)
+        return DeterministicRCAProvider()
+
+    return DeterministicRCAProvider()
+
+
 class SupervisoryRCAAgent:
     """Supervisory RCA Agent coordinating case-level hypothesis generation and arbitration."""
 
@@ -377,8 +410,7 @@ class SupervisoryRCAAgent:
         if provider is not None:
             self.provider = provider
         else:
-            # Deterministic arbitration is the default
-            self.provider = DeterministicRCAProvider()
+            self.provider = get_rca_provider(llm_mode=self.llm_mode)
 
     def diagnose(self, dossier: IncidentDossier) -> tuple[SupervisorProposal, ClaimEvidenceManifest]:
         """Formulates case-level proposal and claim manifest from compact incident dossier."""
@@ -387,3 +419,4 @@ class SupervisoryRCAAgent:
         except Exception:
             # Safe deterministic fallback if custom or remote provider raises
             return DeterministicRCAProvider().diagnose(dossier)
+

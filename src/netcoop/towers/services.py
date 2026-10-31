@@ -192,6 +192,12 @@ class ServicesEngine:
                     if any(k in msg_upper for k in dhcp_keywords) or obs.log_level in ("ERROR", "CRITICAL"):
                         dhcp_obs.append(obs)
                         target_entity = obs.entity_id
+            elif isinstance(obs, MetricObservation) and "DHCP" in obs.entity_id.upper():
+                if (obs.metric_name == "packet_loss_pct" and obs.value >= 50.0) or (
+                    obs.metric_name == "latency_ms" and obs.value >= 1000.0
+                ):
+                    dhcp_obs.append(obs)
+                    target_entity = obs.entity_id
 
         if not dhcp_obs:
             return

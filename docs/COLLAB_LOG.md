@@ -1239,6 +1239,94 @@ All Phase 7 exit criteria are completely satisfied:
 
 ---
 
+## Phase 8 implementation handoff: Benchmarking, evaluation, hardening, and OpenRouter integration
+
+- Date/time (ISO 8601): 2026-10-31T15:00:00Z
+- Implementation owner: Friend A
+- Assigned reviewer: Friend B
+- Branch: `hackathon/team-integration`
+- Base commit SHA: `0496c04`
+- Result commit SHA: (pending commit)
+- Status: `AWAITING_REVIEW`
+
+### Scope completed
+
+- Verified session designation: `TEAMMATE_ID = A` (Friend A).
+- Implemented OpenRouter LLM Provider Adapter and Environment Configuration:
+  - `.env` & `.env.example`: Added configuration for `OPENROUTER_API_KEY`, `OPENROUTER_MODEL` (default: `meta-llama/llama-3.3-70b-instruct:free`, supporting free models), `OPENROUTER_BASE_URL`, and `NETCOOP_LLM_MODE`.
+  - `src/netcoop/utils/env.py`: Implemented zero-dependency `load_dotenv` parser reading `.env` into `os.environ` at runtime.
+  - `src/netcoop/supervisor/openrouter.py`: Implemented `OpenRouterProvider` adhering to `RCAProvider` protocol:
+    - Queries OpenRouter API via HTTP POST using Python standard library `urllib.request`.
+    - Compact prompt synthesis with strict citation invariants: passes only valid finding IDs and observation IDs, strictly forbidding invented or minted IDs.
+    - Hallucination sanitization: parses and validates LLM response JSON, stripping any hallucinated finding or observation IDs not present in the incident dossier.
+    - Transparent resilience: automatically and gracefully falls back to `DeterministicRCAProvider` if the API key is missing, network fails, or response is malformed, ensuring 100% availability.
+  - `src/netcoop/supervisor/agent.py`: Implemented `get_rca_provider(llm_mode, api_key, model)` supporting `off` (100% deterministic), `auto` (opportunistic LLM with deterministic fallback), and `on` (enforces API key presence).
+  - `src/netcoop/cli/main.py`: Connected `get_rca_provider` to `netcoop diagnose --llm off|auto|on`, and added OpenRouter status reporting to `netcoop doctor`.
+- Fixed DHCP Metric Detection in Services Tower (`src/netcoop/towers/services.py`):
+  - Extended `_detect_dhcp_anomalies` to detect `MetricObservation` anomalies (severe packet loss >= 50% or latency >= 1000ms) on DHCP server entities in addition to log errors.
+- Comprehensive Benchmark Evaluation & Hardening Test Suite (17 new unit tests, 149 total unit tests passing):
+  - `tests/unit/test_openrouter.py` (7 tests):
+    - `test_env_loading_from_file`
+    - `test_openrouter_provider_fallback_without_api_key`
+    - `test_openrouter_build_prompt_payload`
+    - `test_openrouter_response_parsing_valid`
+    - `test_openrouter_strips_hallucinated_ids`
+    - `test_openrouter_network_error_fallback`
+    - `test_get_rca_provider_factory`
+  - `tests/unit/test_benchmarks_and_robustness.py` (10 tests):
+    - `test_all_seven_benchmark_scenarios_accuracy` across all 7 scenarios (`healthy`, `link_congestion`, `weak_wifi`, `device_overload`, `dns_failure`, `interface_fault`, `dhcp_failure`): achieves 100% Top-1 diagnosis accuracy against official ground truth.
+    - `test_red_herring_high_utilization_alone_does_not_diagnose_congestion`: verifies non-escalation when link utilization is 92.5% without queue drops or packet loss.
+    - `test_deterministic_replay_and_reproducibility`: verifies repeated runs yield byte-for-byte identical root causes, confidence scores, and evidence items.
+    - `test_zero_leakage_of_ground_truth_into_runtime`: asserts that no runtime modules reference or import evaluation ground truth files.
+- Linter and Code Quality:
+  - `ruff check .` clean (0 warnings, 0 errors).
+  - All 149 tests pass in ~6 seconds.
+
+### Files changed
+
+- `.env.example`: Template for OpenRouter API configuration.
+- `src/netcoop/utils/env.py`: Zero-dependency `.env` file loader.
+- `src/netcoop/supervisor/openrouter.py`: OpenRouter LLM adapter with schema sanitization and fallback.
+- `src/netcoop/supervisor/agent.py`: Integrated `get_rca_provider` factory with `OpenRouterProvider`.
+- `src/netcoop/supervisor/__init__.py`: Exported `OpenRouterProvider` and `get_rca_provider`.
+- `src/netcoop/towers/services.py`: Extended DHCP anomaly detection to metric probes.
+- `src/netcoop/cli/main.py`: Connected LLM mode factory and added OpenRouter health check in `doctor`.
+- `tests/unit/test_openrouter.py`: Unit tests for OpenRouter adapter and env loader.
+- `tests/unit/test_benchmarks_and_robustness.py`: Full 7-scenario benchmark evaluation and robustness tests.
+- `docs/COLLAB_LOG.md`: Appended Phase 8 implementation handoff.
+- `COLLAB_LOG.md`: Synced with `docs/COLLAB_LOG.md`.
+- `docs/PHASE_STATUS.md`: Updated Phase 8 status to AWAITING_REVIEW.
+- `PHASE_STATUS.md`: Synced with `docs/PHASE_STATUS.md`.
+
+### Tests and commands actually run
+
+| Command | Result | Notes |
+|---|---|---|
+| `.venv/bin/pytest -v` | PASS | 149 of 149 unit tests passed in 6.36s |
+| `.venv/bin/ruff check .` | PASS | Clean, 0 errors |
+| `.venv/bin/netcoop doctor` | PASS | All 7 components OK (including OpenRouter offline/online status check) |
+| `.venv/bin/netcoop demo` | PASS | Full 5-scenario demo runs offline passing all gate checks |
+| `.venv/bin/netcoop diagnose fixtures/scenarios/dhcp_failure` | PASS | Diagnosed DHCP_FAILURE on SRV_DHCP_01 |
+| `.venv/bin/netcoop diagnose fixtures/scenarios/healthy` | PASS | Clean ABSTAIN certified (confidence 0.0) |
+
+### Reviewer checklist
+
+- [ ] Inspect git diff and verify OpenRouter LLM integration and fallback mechanics.
+- [ ] Run `pytest -v` independently (149 tests passing).
+- [ ] Run `ruff check .` independently.
+- [ ] Verify `.env` is ignored by git and `.env.example` is tracked.
+- [ ] Verify `netcoop doctor` displays OpenRouter provider status.
+- [ ] Verify benchmark accuracy across all 7 scenarios in `fixtures/scenarios/`.
+- [ ] Verify ground-truth isolation (zero leakage into runtime logic).
+- [ ] Verify Phase 8 exit criteria.
+
+### Next phase
+
+- Phase: Final Project Acceptance & Hackathon Release
+- Owner: Friend B (Reviewer) & Friend A
+
+---
+
 ## Subsequent phases
 
 Append each implementation handoff and its review after the preceding phase has been verified. Do not replace this section with a rewritten summary.

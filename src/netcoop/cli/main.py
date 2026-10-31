@@ -8,6 +8,7 @@ and offline demonstration.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -34,12 +35,15 @@ from netcoop.reports.renderer import render_markdown_report
 from netcoop.storage.sqlite import SQLiteRepository
 from netcoop.supervisor.agent import (
     DeterministicRCAProvider,
-    FakeLLMProvider,
     SupervisoryRCAAgent,
+    get_rca_provider,
 )
 from netcoop.supervisor.gate import EvidenceReleaseGate
 from netcoop.supervisor.runtime import EvidenceGateRejectionError, SupervisorRuntime
+from netcoop.utils.env import load_dotenv
 from netcoop.utils.id_generator import generate_id
+
+load_dotenv()
 
 app = typer.Typer(
     name="netcoop",
@@ -126,6 +130,14 @@ def doctor():
         table.add_row("Supervisor & Gate", "OK", "SupervisorRuntime & EvidenceReleaseGate initialized")
     except Exception as e:
         table.add_row("Supervisor & Gate", "[red]FAIL[/red]", str(e))
+
+    # 7. OpenRouter LLM Provider check
+    openrouter_key = os.environ.get("OPENROUTER_API_KEY", "")
+    model_name = os.environ.get("OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct:free")
+    if openrouter_key:
+        table.add_row("OpenRouter Provider", "OK", f"Configured ({model_name})")
+    else:
+        table.add_row("OpenRouter Provider", "Offline", "No API key (Deterministic fallback active)")
 
     console.print(table)
 
@@ -335,14 +347,13 @@ def diagnose(
     repo = SQLiteRepository(db_path or ":memory:")
 
     # Setup RCA Agent based on LLM mode
-    if llm == "on":
-        rca_provider = FakeLLMProvider()
-    elif llm == "auto":
-        rca_provider = DeterministicRCAProvider()
-    else:
-        rca_provider = DeterministicRCAProvider()
+    try:
+        rca_provider = get_rca_provider(llm_mode=llm)
+    except ValueError as e:
+        console.print(f"[bold red]Configuration Error:[/bold red] {e}")
+        raise typer.Exit(code=1)
 
-    rca_agent = SupervisoryRCAAgent(provider=rca_provider)
+    rca_agent = SupervisoryRCAAgent(provider=rca_provider, llm_mode=llm)
     fabric = IntegrationFabric(repository=repo)
     gate = EvidenceReleaseGate(repository=repo)
     runtime = SupervisorRuntime(fabric=fabric, repository=repo, rca_agent=rca_agent, gate=gate)

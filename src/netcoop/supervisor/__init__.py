@@ -8,6 +8,7 @@ from netcoop.supervisor.agent import (
     FakeLLMProvider,
     RCAProvider,
     SupervisoryRCAAgent,
+    get_rca_provider,
 )
 from netcoop.supervisor.gate import EvidenceReleaseGate
 from netcoop.supervisor.models import (
@@ -20,6 +21,7 @@ from netcoop.supervisor.models import (
     IncidentLifecycleState,
     InvestigationBudget,
 )
+from netcoop.supervisor.openrouter import OpenRouterProvider
 from netcoop.supervisor.runtime import EvidenceGateRejectionError, SupervisorRuntime
 
 __all__ = [
@@ -35,7 +37,9 @@ __all__ = [
     "IncidentDossier",
     "IncidentLifecycleState",
     "InvestigationBudget",
+    "OpenRouterProvider",
     "RCAProvider",
     "SupervisorRuntime",
     "SupervisoryRCAAgent",
+    "get_rca_provider",
 ]
