@@ -6,7 +6,7 @@ investigation budgets, and independent EvidenceReleaseGate validation.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -21,7 +21,12 @@ from netcoop.models.enums import (
 )
 from netcoop.models.findings import Finding
 from netcoop.models.hypotheses import Hypothesis
-from netcoop.models.observations import MetricObservation
+from netcoop.models.observations import (
+    ConfigObservation,
+    LogObservation,
+    MetricObservation,
+    TopologyObservation,
+)
 from netcoop.models.reports import ClaimEvidenceManifest, SupervisorProposal
 from netcoop.storage.sqlite import SQLiteRepository
 from netcoop.supervisor.agent import (
@@ -29,7 +34,7 @@ from netcoop.supervisor.agent import (
     FakeLLMProvider,
     SupervisoryRCAAgent,
 )
-from netcoop.supervisor.gate import EvidenceReleaseGate
+from netcoop.supervisor.gate import EvidenceReleaseGate, _infer_impact_records
 from netcoop.supervisor.models import (
     GateOutcome,
     IncidentDossier,
@@ -394,6 +399,26 @@ def test_supervisor_conflict_classification_and_task_dispatch():
     # Hardware/overload has higher causal priority than downstream congestion
     assert "DEVICE_OVERLOAD" in proposal2.suspected_root_cause
 
+    dossier.task_history = [
+        {"status": "COMPLETED", "hypothesis_reviews": [
+            {"fault_code": "LINK_CONGESTION", "status": "inconclusive", "new_evidence_refs": [],
+                "disposition": "operator_input_needed", "discriminating_measurement": "repeated link counters",
+                "missing_measurements": ["same-time readings conflict"]},
+        ]},
+        {"status": "COMPLETED", "hypothesis_reviews": [
+            {"fault_code": "DEVICE_OVERLOAD", "status": "inconclusive", "new_evidence_refs": [],
+                "disposition": "operator_input_needed", "discriminating_measurement": "repeated CPU samples",
+                "missing_measurements": ["same-time readings conflict"]},
+        ]},
+    ]
+    classified_conflicts = provider._classify_conflicts(dossier)
+    assert any({"LINK_CONGESTION", "DEVICE_OVERLOAD"} <= set(item.competing_hypotheses) for item in classified_conflicts)
+    proposal3, _ = provider.diagnose(dossier)
+    assert proposal3.decision == ProposalDecision.ABSTAIN
+    assert set(proposal3.alternative_causes) == {"LINK_CONGESTION", "DEVICE_OVERLOAD"}
+    assert len(proposal3.operator_questions) == 1
+    assert "authoritative" in proposal3.operator_questions[0]
+
 
 def test_disjoint_supported_hypotheses_are_reported_as_concurrent_causes():
     now = datetime.now(timezone.utc)
@@ -558,6 +583,234 @@ def test_gate_rejection_exposes_actionable_retry_issue(memory_repo: SQLiteReposi
     assert result.passed is False
     assert {issue.code for issue in result.issues} >= {"missing_support"}
     assert all(issue.check_name for issue in result.issues)
+
+
+def test_unavailable_signal_becomes_specific_operator_question():
+    dossier = IncidentDossier(
+        incident_id="INC-OPERATOR-QUESTION",
+        task_history=[{
+            "status": "SIGNAL_UNAVAILABLE",
+            "objective": {
+                "target_entities": ["SW-EDGE-2"],
+                "required_signals": ["cpu_utilization_pct", "memory_utilization_pct"],
+            },
+        }],
+    )
+
+    questions = DeterministicRCAProvider._operator_questions(dossier)
+    assert len(questions) == 1
+    assert "SW-EDGE-2" in questions[0]
+    assert "timestamps and collector/source names" in questions[0]
+
+
+def test_task_selection_ranks_information_value_against_cost():
+    high_value = {
+        "objective": {"expected_information_gain": 0.8, "decision_impact": 1.0, "estimated_cost": 1.0}
+    }
+    low_value = {
+        "objective": {"expected_information_gain": 0.3, "decision_impact": 0.5, "estimated_cost": 2.0}
+    }
+    assert SupervisorRuntime._task_value(high_value) > SupervisorRuntime._task_value(low_value)
+
+
+def test_task_value_uses_signal_coverage_time_and_source_diversity(sample_utc_time):
+    candidate = {
+        "objective": {
+            "required_signals": ["cpu_utilization_pct", "memory_utilization_pct"],
+            "target_entities": ["SW-EDGE-2"], "estimated_cost": 1.0,
+        }
+    }
+    sparse = [MetricObservation(
+        observation_id="OBS-ONE", incident_id="INC-VALUE", source="collector-a",
+        entity_id="SW-EDGE-2", metric_name="cpu_utilization_pct", value=90.0,
+        unit="percent", timestamp=sample_utc_time,
+    )]
+    corroborated = [
+        MetricObservation(
+            observation_id=f"OBS-{metric}-{index}", incident_id="INC-VALUE",
+            source=f"collector-{index % 2}", entity_id="SW-EDGE-2",
+            metric_name=metric, value=90.0, unit="percent",
+            timestamp=sample_utc_time + timedelta(seconds=index),
+        )
+        for metric in ("cpu_utilization_pct", "memory_utilization_pct")
+        for index in range(3)
+    ]
+
+    assert SupervisorRuntime._task_value(candidate, corroborated) > SupervisorRuntime._task_value(candidate, sparse)
+
+
+def test_signal_detection_does_not_confuse_unrelated_logs_or_topology(sample_utc_time):
+    dns_log = LogObservation(
+        observation_id="LOG-DNS", incident_id="INC-SIGNAL", source="syslog",
+        entity_id="resolver-1", log_level="ERROR", message="SERVFAIL for example.org",
+        timestamp=sample_utc_time,
+    )
+    topology = TopologyObservation(
+        observation_id="TOPO-PATH", incident_id="INC-SIGNAL", source="map",
+        entity_id="SW-CORE", source_entity="SW-CORE", target_entity="SW-DIST",
+        relationship_type="connected_to", timestamp=sample_utc_time,
+    )
+    config = ConfigObservation(
+        observation_id="CFG-CURRENT", incident_id="INC-SIGNAL", source="backup",
+        entity_id="SW-CORE", config_key="mtu", config_value="1500", timestamp=sample_utc_time,
+    )
+
+    assert SupervisorRuntime._has_required_signal(["dns_response_code"], [dns_log])
+    assert not SupervisorRuntime._has_required_signal(["dhcp_lease_events"], [dns_log])
+    assert not SupervisorRuntime._has_required_signal(["path_reachability"], [topology])
+    assert SupervisorRuntime._has_required_signal(["config_current_value"], [config])
+    assert not SupervisorRuntime._has_required_signal(["config_baseline"], [config])
+
+
+def test_topology_impact_traverses_dependencies_without_spreading_through_physical_links(sample_utc_time):
+    observations = [
+        TopologyObservation(
+            observation_id="DEP-DNS-ZONE", incident_id="INC-IMPACT", source="map",
+            entity_id="ZONE-A", source_entity="ZONE-A", target_entity="DNS-1",
+            relationship_type="dns", timestamp=sample_utc_time,
+        ),
+        TopologyObservation(
+            observation_id="DEP-ZONE-SEGMENT", incident_id="INC-IMPACT", source="map",
+            entity_id="SEGMENT-B", source_entity="SEGMENT-B", target_entity="ZONE-A",
+            relationship_type="uplink", timestamp=sample_utc_time,
+        ),
+        TopologyObservation(
+            observation_id="PHYS-DNS-SW", incident_id="INC-IMPACT", source="map",
+            entity_id="DNS-1", source_entity="DNS-1", target_entity="SW-CORE",
+            relationship_type="connected_to", timestamp=sample_utc_time,
+        ),
+        TopologyObservation(
+            observation_id="PHYS-OTHER", incident_id="INC-IMPACT", source="map",
+            entity_id="SW-CORE", source_entity="SW-CORE", target_entity="SW-OTHER",
+            relationship_type="connected_to", timestamp=sample_utc_time,
+        ),
+    ]
+
+    impacts = _infer_impact_records(["DNS-1"], observations)
+    by_entity = {impact.entity_id: impact for impact in impacts}
+    assert set(by_entity) == {"ZONE-A", "SEGMENT-B"}
+    assert by_entity["ZONE-A"].hops == 1
+    assert by_entity["ZONE-A"].topology_evidence_refs == ["DEP-DNS-ZONE"]
+    assert by_entity["SEGMENT-B"].hops == 2
+    assert by_entity["SEGMENT-B"].path == ["DNS-1", "ZONE-A", "SEGMENT-B"]
+
+
+def test_interface_level_topology_impact_excludes_parent_device(sample_utc_time):
+    observations = [
+        TopologyObservation(
+            observation_id="LINK-CORE-DIST", incident_id="INC-PORT-IMPACT", source="map",
+            entity_id="SW-CORE", source_entity="SW-CORE", target_entity="SW-DIST",
+            relationship_type="connected_to", interface_name="SW-CORE:eth2", timestamp=sample_utc_time,
+        ),
+        TopologyObservation(
+            observation_id="LINK-DIST-AP", incident_id="INC-PORT-IMPACT", source="map",
+            entity_id="SW-DIST", source_entity="SW-DIST", target_entity="AP-2",
+            relationship_type="connected_to", interface_name="SW-DIST:eth1", timestamp=sample_utc_time,
+        ),
+    ]
+
+    impacts = _infer_impact_records(["SW-CORE:eth2"], observations)
+    by_entity = {impact.entity_id: impact for impact in impacts}
+    assert set(by_entity) == {"SW-DIST", "AP-2"}
+    assert "SW-CORE" not in by_entity
+    assert by_entity["SW-DIST"].path == ["SW-CORE:eth2", "SW-DIST"]
+    assert by_entity["AP-2"].topology_evidence_refs == ["LINK-CORE-DIST", "LINK-DIST-AP"]
+
+
+def test_task_result_rejects_mismatched_observation_provenance():
+    now = datetime.now(timezone.utc)
+    observation = MetricObservation(
+        observation_id="OBS-PROVENANCE",
+        incident_id="INC-PROVENANCE",
+        source="collector-a",
+        entity_id="SW-EDGE-2",
+        metric_name="cpu_utilization_pct",
+        value=91.0,
+        unit="percent",
+        timestamp=now,
+    )
+    history_entry = {"warnings": [], "limitations": []}
+    artifact = {
+        "incident_id": "INC-PROVENANCE",
+        "capability": "infrastructure.challenge_device_overload_hypothesis",
+        "target_entities": ["SW-EDGE-2"],
+        "findings": [], "hypotheses": [], "finding_refs": [],
+        "evidence_refs": ["OBS-PROVENANCE"], "summary": "reviewed",
+        "evidence_context": [{
+            "observation_id": "OBS-PROVENANCE", "observed_at": now,
+            "source": "invented-source", "entity_id": "SW-EDGE-2",
+            "signal": "cpu_utilization_pct", "value": 91.0, "unit": "percent",
+        }],
+    }
+
+    SupervisorRuntime._merge_task_artifact(
+        IncidentDossier(incident_id="INC-PROVENANCE"), artifact, history_entry,
+        [], ["OBS-PROVENANCE"], {"OBS-PROVENANCE": observation},
+    )
+    assert any("provenance does not match" in warning for warning in history_entry["warnings"])
+
+
+def test_stored_only_task_skips_when_required_signal_is_unavailable():
+    runtime = SupervisorRuntime()
+    dossier = IncidentDossier(incident_id="INC-SIGNAL-MISSING")
+    proposal = SupervisorProposal(
+        proposal_id="PROP-SIGNAL-MISSING", incident_id="INC-SIGNAL-MISSING",
+        decision=ProposalDecision.REQUEST_EVIDENCE, confidence_category=ConfidenceCategory.LOW,
+        requested_tasks=[{
+            "assignee": TowerId.INFRASTRUCTURE.value,
+            "capability": "infrastructure.challenge_device_overload_hypothesis",
+            "objective": {
+                "hypothesis_code": "DEVICE_OVERLOAD", "target_entities": ["SW-EDGE-2"],
+                "required_signals": ["cpu_utilization_pct", "memory_utilization_pct"],
+                "evidence_mode": "stored_observations_only",
+            },
+        }],
+        created_at=datetime.now(timezone.utc),
+    )
+
+    dispatched = runtime._dispatch_task_requests(proposal, dossier, "INC-SIGNAL-MISSING", [])
+    assert dispatched == 0
+    assert runtime.tasks_dispatched == 0
+    assert dossier.task_history[0]["status"] == "SIGNAL_UNAVAILABLE"
+    assert DeterministicRCAProvider._operator_questions(dossier)
+
+
+def test_same_task_repeats_only_after_observation_set_changes(memory_repo: SQLiteRepository, sample_utc_time):
+    incident_id = "INC-TASK-NOVELTY"
+    first = MetricObservation(
+        observation_id="OBS-CPU-A", incident_id=incident_id, source="collector-a",
+        entity_id="SW-EDGE-2", metric_name="cpu_utilization_pct", value=91.0,
+        unit="percent", timestamp=sample_utc_time,
+    )
+    memory_repo.insert_observation(first)
+    runtime = SupervisorRuntime(repository=memory_repo)
+    dossier = IncidentDossier(incident_id=incident_id)
+    proposal = SupervisorProposal(
+        proposal_id="PROP-TASK-NOVELTY", incident_id=incident_id,
+        decision=ProposalDecision.REQUEST_EVIDENCE, confidence_category=ConfidenceCategory.LOW,
+        requested_tasks=[{
+            "assignee": TowerId.INFRASTRUCTURE.value, "capability": "INVESTIGATE_DEVICE",
+            "objective": {"target_entities": ["SW-EDGE-2"]},
+        }],
+        created_at=datetime.now(timezone.utc),
+    )
+
+    runtime._dispatch_task_requests(proposal, dossier, incident_id, [first])
+    runtime._dispatch_task_requests(proposal, dossier, incident_id, [first])
+    assert runtime.tasks_dispatched == 1
+    assert dossier.task_history[-1]["status"] == "SKIPPED_DUPLICATE"
+
+    second = MetricObservation(
+        observation_id="OBS-CPU-B", incident_id=incident_id, source="collector-a",
+        entity_id="SW-EDGE-2", metric_name="cpu_utilization_pct", value=89.0,
+        unit="percent", timestamp=sample_utc_time + timedelta(seconds=30),
+    )
+    memory_repo.insert_observation(second)
+    runtime._dispatch_task_requests(proposal, dossier, incident_id, [first, second])
+    assert runtime.tasks_dispatched == 2
+    assert dossier.task_history[-1]["status"] == "COMPLETED"
+    assert dossier.task_history[-1]["new_evidence_refs"] == []
+    assert set(dossier.task_history[-1]["evidence_refs"]) == {"OBS-CPU-A", "OBS-CPU-B"}
 
 
 def test_runtime_retries_gate_once_after_invalid_citation(sample_incident_observations: list):

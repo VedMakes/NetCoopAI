@@ -16,7 +16,12 @@ from netcoop.communication.tasks import DiagnosticTaskArtifact
 from netcoop.models.enums import ConfidenceCategory, ProposalDecision, TowerId
 from netcoop.models.findings import Finding
 from netcoop.models.hypotheses import Hypothesis
-from netcoop.models.observations import MetricObservation, TopologyObservation
+from netcoop.models.observations import (
+    ConfigObservation,
+    LogObservation,
+    MetricObservation,
+    TopologyObservation,
+)
 from netcoop.models.reports import ClaimEvidenceManifest, FinalReport, PathTriage, TowerReport
 from netcoop.supervisor.agent import SupervisoryRCAAgent
 from netcoop.supervisor.gate import EvidenceReleaseGate
@@ -71,7 +76,7 @@ class SupervisorRuntime:
         self.supervisor_calls: int = 0
         self.investigation_rounds: int = 0
         self.tasks_dispatched: int = 0
-        self._task_fingerprints: set[tuple[str, str, str, tuple[str, ...]]] = set()
+        self._task_fingerprints: set[tuple[str, str, str, tuple[str, ...], tuple[str, ...]]] = set()
 
     @property
     def budget_used(self) -> dict[str, int]:
@@ -337,8 +342,10 @@ class SupervisorRuntime:
                 confidence=0.0,
                 confidence_category=ConfidenceCategory.INSUFFICIENT,
                 affected_devices=[],
+                directly_affected_entities=proposal.affected_entities,
                 supporting_evidence=[],
                 alternative_causes=proposal.alternative_causes,
+                operator_questions=proposal.operator_questions,
                 recommended_actions=["Resolve the evidence-gate issues and collect any missing discriminating telemetry."],
                 evidence_sources=[],
                 limitations=gate_result.errors or gate_result.warnings,
@@ -384,8 +391,13 @@ class SupervisorRuntime:
     ) -> int:
         """Dispatch only the supervisor's bounded, capability-routed read-only tasks."""
         dispatched = 0
-        known_ids = {observation.observation_id for observation in observations}
-        for task_request in proposal.requested_tasks:
+        known_observations = {observation.observation_id: observation for observation in observations}
+        indexed_requests = [
+            (self._task_value(request, list(known_observations.values())), index, request)
+            for index, request in enumerate(proposal.requested_tasks)
+        ]
+        indexed_requests.sort(key=lambda item: item[0], reverse=True)
+        for rank, (selection_score, original_index, task_request) in enumerate(indexed_requests, start=1):
             if self.tasks_dispatched >= self.budget.max_tasks:
                 break
             assignee = task_request.get("assignee")
@@ -399,11 +411,55 @@ class SupervisorRuntime:
                     "limitations": [],
                 })
                 continue
+            objective = dict(objective)
+            objective.setdefault("estimated_cost", 1.0)
+            objective.setdefault("expected_information_gain", 0.5)
+            objective["selection_rank"] = rank
+            objective["selection_score"] = selection_score
+            targets = objective.get("target_entities", [])
+            relevant_observations = [
+                observation for observation in known_observations.values()
+                if not targets or observation.entity_id in targets
+                or any(observation.entity_id.startswith(f"{target}:") for target in targets)
+            ]
+            required_signals = objective.get("required_signals", [])
+            if (
+                objective.get("evidence_mode") == "stored_observations_only"
+                and required_signals
+                and not self._has_required_signal(required_signals, relevant_observations)
+            ):
+                dossier.task_history.append({
+                    "assignee": str(assignee), "capability": capability,
+                    "status": "SIGNAL_UNAVAILABLE", "objective": objective,
+                    "result": {
+                        "summary": "Required signal is absent from the stored incident observations; no probe or source connector is configured.",
+                        "unavailable_signals": required_signals,
+                    },
+                    "warnings": ["This capability can inspect stored observations only; it did not run a live network probe."],
+                    "limitations": ["No configured read-only source can collect the required signal."],
+                    "new_evidence_refs": [],
+                })
+                self._explain(
+                    "task selection",
+                    f"Skipped {assignee} / {capability}: required signal unavailable in stored evidence; "
+                    "no live connector exists, so asking the operator is more useful than re-analysis.",
+                )
+                continue
+            self._explain(
+                "task selection",
+                f"Selected rank {rank} (candidate {original_index + 1}) {assignee} / {capability}; "
+                f"heuristic information-value/cost={objective['selection_score']:.2f}; "
+                f"discriminator={objective.get('discriminating_measurement') or objective.get('question', 'unspecified')}.",
+            )
+            relevant_ids = tuple(sorted(
+                observation.observation_id for observation in relevant_observations
+            ))
             fingerprint = (
                 str(assignee).casefold(),
                 str(capability),
                 str(objective.get("hypothesis_code", "")),
-                tuple(sorted(str(entity) for entity in objective.get("target_entities", []))),
+                tuple(sorted(str(entity) for entity in targets)),
+                relevant_ids,
             )
             if fingerprint in self._task_fingerprints:
                 dossier.task_history.append({
@@ -415,6 +471,7 @@ class SupervisorRuntime:
                 })
                 continue
             try:
+                evidence_before_task = set(known_observations)
                 task = self.fabric.create_task(
                     requester="supervisor",
                     assignee=assignee,
@@ -424,6 +481,11 @@ class SupervisorRuntime:
                 )
                 result = self.fabric.dispatch_task(task.task_id)
                 self._task_fingerprints.add(fingerprint)
+                if self.repo is not None:
+                    known_observations.update({
+                        observation.observation_id: observation
+                        for observation in self.repo.get_observations(incident_id)
+                    })
             except (ValueError, KeyError, PermissionError) as exc:
                 dossier.task_history.append({
                     "capability": capability,
@@ -448,7 +510,11 @@ class SupervisorRuntime:
                 "evidence_refs": result.evidence_refs,
                 "warnings": result.warnings,
                 "limitations": result.limitations,
+                "objective": objective,
+                "selection_score": objective["selection_score"],
             }
+            new_evidence_refs = sorted(set(result.evidence_refs) - evidence_before_task)
+            history_entry["new_evidence_refs"] = new_evidence_refs
             if result.result_schema != task.expected_result_schema:
                 history_entry["warnings"].append(
                     f"Result schema mismatch: expected {task.expected_result_schema}, got {result.result_schema}."
@@ -456,22 +522,133 @@ class SupervisorRuntime:
             elif result.status.value == "COMPLETED" and result.result:
                 self._merge_task_artifact(
                     dossier, result.result, history_entry,
-                    result.finding_refs, result.evidence_refs, known_ids,
+                    result.finding_refs, result.evidence_refs, known_observations,
                 )
             review_summaries = [
                 review.get("summary", "")
                 for review in history_entry.get("hypothesis_reviews", [])
                 if isinstance(review, dict)
             ]
+            temporal_summaries = [
+                summary
+                for review in history_entry.get("hypothesis_reviews", [])
+                if isinstance(review, dict)
+                for summary in review.get("temporal_summaries", [])
+                if isinstance(summary, dict)
+            ]
+            temporal_preview = "; ".join(
+                f"{summary.get('entity_id')}.{summary.get('signal')}: "
+                f"{summary.get('time_point_count')} time point(s), {summary.get('source_count')} source(s), "
+                f"range={summary.get('min_value')}..{summary.get('max_value')}, "
+                f"conflict_times={summary.get('conflicting_time_points')}"
+                for summary in temporal_summaries[:6]
+            ) or "none"
+            for review in history_entry.get("hypothesis_reviews", []):
+                review["new_evidence_refs"] = sorted(
+                    set(review.get("inspected_evidence_refs", [])) & set(new_evidence_refs)
+                )
+            evidence_context = history_entry.get("result", {}).get("evidence_context", [])
+            unavailable_signals = history_entry.get("result", {}).get("unavailable_signals", [])
+            provenance_preview = "; ".join(
+                f"{item.get('observation_id')} {item.get('entity_id')}.{item.get('signal')}="
+                f"{item.get('value')} [{item.get('source')} @ {item.get('observed_at')}]"
+                for item in evidence_context[:5]
+                if isinstance(item, dict)
+            ) or "none"
+            if len(evidence_context) > 5:
+                provenance_preview += f"; +{len(evidence_context) - 5} item(s) omitted"
             self._explain(
                 "handoff",
                 f"supervisor -> {assignee} / {capability}; status={result.status.value}; "
                 f"evidence={', '.join(result.evidence_refs) or 'none'}; "
                 f"review={'; '.join(review_summaries) or 'no structured hypothesis review'}; "
+                f"temporal={temporal_preview}; "
+                f"new_evidence={len(history_entry['new_evidence_refs'])}; "
+                f"provenance={len(evidence_context)} item(s); "
+                f"sample={provenance_preview}; "
+                f"unavailable={'; '.join(unavailable_signals) or 'none'}; "
                 f"warnings={'; '.join(result.warnings) or 'none'}",
             )
             dossier.task_history.append(history_entry)
         return dispatched
+
+    @staticmethod
+    def _task_value(
+        task_request: dict[str, Any], observations: list[CanonicalObservation] | None = None
+    ) -> float:
+        """Rank task candidates by a declared heuristic value-per-cost (not formal entropy)."""
+        objective = task_request.get("objective", {})
+        try:
+            information_gain = max(0.0, min(1.0, float(objective.get("expected_information_gain", 0.5))))
+            required_signals = set(objective.get("required_signals", []))
+            targets = objective.get("target_entities", [])
+            if observations and required_signals:
+                scoped = [
+                    observation for observation in observations
+                    if (not targets or observation.entity_id in targets
+                        or any(observation.entity_id.startswith(f"{target}:") for target in targets))
+                ]
+                represented = {
+                    signal for signal in required_signals
+                    if SupervisorRuntime._has_required_signal([signal], scoped)
+                }
+                relevant = [
+                    observation for observation in scoped
+                    if SupervisorRuntime._observation_matches_signal(observation, required_signals)
+                ]
+                coverage = len(represented) / len(required_signals)
+                temporal = min(1.0, len({item.timestamp for item in relevant}) / 3.0)
+                source_diversity = min(1.0, len({item.source for item in relevant}) / 2.0)
+                information_gain = min(
+                    1.0,
+                    coverage * 0.5 + temporal * 0.25 + source_diversity * 0.25,
+                )
+                by_time_metric: dict[tuple[str, str, datetime], set[float]] = {}
+                for item in relevant:
+                    by_time_metric.setdefault((item.entity_id, item.metric_name, item.timestamp), set()).add(item.value)
+                if any(len(values) > 1 for values in by_time_metric.values()):
+                    information_gain = min(1.0, information_gain + 0.15)
+            decision_impact = max(0.0, min(1.0, float(objective.get("decision_impact", 1.0))))
+            estimated_cost = max(0.01, float(objective.get("estimated_cost", 1.0)))
+        except (TypeError, ValueError):
+            return 0.0
+        return information_gain * decision_impact / estimated_cost
+
+    @staticmethod
+    def _has_required_signal(required_signals: list[str], observations: list[CanonicalObservation]) -> bool:
+        return any(
+            SupervisorRuntime._observation_matches_signal(observation, required_signals)
+            for observation in observations
+        )
+
+    @staticmethod
+    def _observation_matches_signal(
+        observation: CanonicalObservation, required_signals: list[str] | set[str]
+    ) -> bool:
+        normalized = {str(signal).casefold() for signal in required_signals}
+        if isinstance(observation, MetricObservation):
+            return observation.metric_name.casefold() in normalized
+        if isinstance(observation, ConfigObservation):
+            return (
+                "config_current_value" in normalized and bool(observation.config_value)
+            ) or (
+                "config_baseline" in normalized and observation.previous_value is not None
+            )
+        if isinstance(observation, LogObservation):
+            message = observation.message.casefold()
+            if "dns_response_code" in normalized:
+                dns_markers = ("dns", "servfail", "nxdomain", "refused", "resolver")
+                if any(marker in message for marker in dns_markers):
+                    return True
+            if "dhcp_lease_events" in normalized:
+                dhcp_markers = ("dhcp", "lease", "scope", "pool", "nak", "discover", "offer")
+                if any(marker in message for marker in dhcp_markers):
+                    return True
+            return "service_error_logs" in normalized and any(
+                marker in message for marker in ("dns", "dhcp", "resolver", "lease", "pool")
+            )
+        # Topology proves configured relationships, not live route or data-plane state.
+        return False
 
     @staticmethod
     def _abstain_for_budget(
@@ -636,7 +813,7 @@ class SupervisorRuntime:
         history_entry: dict[str, Any],
         declared_finding_refs: list[str],
         declared_evidence_refs: list[str],
-        known_observation_ids: set[str],
+        known_observations: dict[str, CanonicalObservation],
     ) -> None:
         """Validate specialist findings before adding them to supervisor context."""
         try:
@@ -652,9 +829,48 @@ class SupervisorRuntime:
                 raise ValueError("Task finding references do not match the returned finding artifacts.")
             if actual_evidence_refs != set(declared_evidence_refs):
                 raise ValueError("Task evidence references do not match the TaskResult envelope.")
-            unknown_observations = (actual_evidence_refs | finding_evidence_refs) - known_observation_ids
+            unknown_observations = (actual_evidence_refs | finding_evidence_refs) - set(known_observations)
             if unknown_observations:
                 raise ValueError(f"Task findings cite unknown observations: {sorted(unknown_observations)}")
+            context_by_id = {
+                item["observation_id"]: item for item in artifact.get("evidence_context", [])
+            }
+            if set(context_by_id) != actual_evidence_refs:
+                raise ValueError("Task evidence context must describe every and only cited observation.")
+            for observation_id, context in context_by_id.items():
+                observation = known_observations[observation_id]
+                expected_signal = getattr(observation, "metric_name", observation.observation_type)
+                expected_value = getattr(observation, "value", None)
+                if expected_value is None:
+                    expected_value = getattr(observation, "message", None)
+                if isinstance(observation, LogObservation):
+                    expected_value = {
+                        "level": observation.log_level,
+                        "message": observation.message,
+                        "facility": observation.facility,
+                    }
+                elif isinstance(observation, ConfigObservation):
+                    expected_value = {
+                        "key": observation.config_key,
+                        "current": observation.config_value,
+                        "previous": observation.previous_value,
+                    }
+                elif isinstance(observation, TopologyObservation):
+                    expected_value = {
+                        "source_entity": observation.source_entity,
+                        "target_entity": observation.target_entity,
+                        "relationship_type": observation.relationship_type,
+                        "interface_name": observation.interface_name,
+                        "link_speed_mbps": observation.link_speed_mbps,
+                    }
+                if (
+                    context["observed_at"] != observation.timestamp
+                    or context["source"] != observation.source
+                    or context["entity_id"] != observation.entity_id
+                    or context["signal"] != expected_signal
+                    or context.get("value") != expected_value
+                ):
+                    raise ValueError(f"Task evidence provenance does not match observation '{observation_id}'.")
             review_refs = {
                 ref
                 for review in artifact.get("hypothesis_reviews", [])

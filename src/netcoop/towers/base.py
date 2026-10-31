@@ -4,13 +4,20 @@ from typing import Any, Protocol, runtime_checkable
 
 from netcoop.communication.queries import PeerQuery, PeerQueryResult
 from netcoop.communication.registry import TowerCapability
-from netcoop.communication.tasks import HypothesisReview, InvestigationTask, TaskResult
+from netcoop.communication.tasks import (
+    EvidenceSignalSummary,
+    HypothesisReview,
+    InvestigationTask,
+    TaskEvidenceItem,
+    TaskResult,
+)
 from netcoop.models.enums import TowerId
 from netcoop.models.observations import (
     CanonicalObservation,
     ConfigObservation,
     LogObservation,
     MetricObservation,
+    TopologyObservation,
 )
 from netcoop.models.reports import TowerReport
 
@@ -74,6 +81,13 @@ def investigate_with_engine(
             or (getattr(obs, "source_entity", None) in target_set)
             or (getattr(obs, "target_entity", None) in target_set)
         ]
+    max_observations = max(1, min(
+        int(task.constraints.get("max_observations", task.objective.get("max_observations", 250))),
+        1000,
+    ))
+    observation_count_before_limit = len(observations)
+    observations = observations[:max_observations]
+    was_truncated = observation_count_before_limit > len(observations)
     if not observations:
         return {
             "incident_id": task.incident_id,
@@ -94,6 +108,9 @@ def investigate_with_engine(
             + review.contradicting_evidence_refs
             + review.inspected_evidence_refs
         ))
+        evidence_context = _evidence_context(
+            [observation for observation in observations if observation.observation_id in set(review_refs)]
+        )
         result = {
             "incident_id": task.incident_id,
             "capability": task.capability,
@@ -105,8 +122,13 @@ def investigate_with_engine(
             "observation_count": len(observations),
             "summary": review.summary,
             "hypothesis_reviews": [review.model_dump(mode="json")],
+            "evidence_context": [item.model_dump(mode="json") for item in evidence_context],
+            "unavailable_signals": review.unavailable_signals,
         }
-        return result, [], review_refs, []
+        review_limitations = ([
+            f"Review scope was capped at {max_observations} of {observation_count_before_limit} stored observations."
+        ] if was_truncated else [])
+        return result, [], review_refs, review_limitations
 
     findings, hypotheses = engine.analyze(task.incident_id, observations)
     if targets:
@@ -120,7 +142,12 @@ def investigate_with_engine(
             for ent in h.suspected_entities
         )]
     finding_refs = [f.finding_id for f in findings]
-    evidence_refs = list(dict.fromkeys(ref for finding in findings for ref in finding.evidence_refs))
+    # Return all scoped observations inspected, including those that did not
+    # cross a finding threshold, so a reviewer can audit the negative evidence.
+    evidence_refs = list(dict.fromkeys(
+        [ref for finding in findings for ref in finding.evidence_refs]
+        + [observation.observation_id for observation in observations]
+    ))
     result = {
         "incident_id": task.incident_id,
         "capability": task.capability,
@@ -130,9 +157,56 @@ def investigate_with_engine(
         "finding_refs": finding_refs,
         "evidence_refs": evidence_refs,
         "observation_count": len(observations),
-        "summary": f"{len(findings)} finding(s) and {len(hypotheses)} hypothesis(es) returned for {len(observations)} scoped observations.",
+        "summary": f"{len(findings)} finding(s) and {len(hypotheses)} hypothesis(es) returned after inspecting {len(observations)} scoped observations.",
+        "evidence_context": [item.model_dump(mode="json") for item in _evidence_context(
+            [observation for observation in observations if observation.observation_id in set(evidence_refs)]
+        )],
     }
-    return result, finding_refs, evidence_refs, []
+    limitations = ([
+        f"Task scope was capped at {max_observations} of {observation_count_before_limit} stored observations."
+    ] if was_truncated else [])
+    return result, finding_refs, evidence_refs, limitations
+
+
+def _evidence_context(observations: list[CanonicalObservation]) -> list[TaskEvidenceItem]:
+    """Attach exact source/time/value metadata to every observation cited by a task."""
+    context: list[TaskEvidenceItem] = []
+    for observation in observations:
+        signal = getattr(observation, "metric_name", observation.observation_type)
+        value = getattr(observation, "value", None)
+        if value is None:
+            value = getattr(observation, "message", None)
+        if isinstance(observation, LogObservation):
+            value = {
+                "level": observation.log_level,
+                "message": observation.message,
+                "facility": observation.facility,
+            }
+        elif isinstance(observation, ConfigObservation):
+            value = {
+                "key": observation.config_key,
+                "current": observation.config_value,
+                "previous": observation.previous_value,
+            }
+        elif isinstance(observation, TopologyObservation):
+            value = {
+                "source_entity": observation.source_entity,
+                "target_entity": observation.target_entity,
+                "relationship_type": observation.relationship_type,
+                "interface_name": observation.interface_name,
+                "link_speed_mbps": observation.link_speed_mbps,
+            }
+        context.append(TaskEvidenceItem(
+            observation_id=observation.observation_id,
+            observed_at=observation.timestamp,
+            source=observation.source,
+            entity_id=observation.entity_id,
+            signal=str(signal),
+            value=value,
+            unit=getattr(observation, "unit", None),
+            limitation="Re-analysis of stored incident evidence; this task did not collect a live measurement.",
+        ))
+    return context
 
 
 def _review_hypothesis(
@@ -171,12 +245,21 @@ def _review_hypothesis(
         "DHCP_FAILURE": {"latency_ms", "packet_loss_pct"},
     }
     metric_names = metrics_by_code.get(fault_code, set())
+    def service_log_matches(item: LogObservation, service: str) -> bool:
+        message = item.message.casefold()
+        if service == "DNS_FAILURE":
+            return any(token in message for token in ("dns", "servfail", "nxdomain", "refused", "resolver"))
+        return any(token in message for token in ("dhcp", "lease", "scope", "pool", "nak", "discover", "offer"))
+
     relevant = [
         item for item in observations
         if (isinstance(item, MetricObservation) and item.metric_name in metric_names)
         or (fault_code == "CONFIG_DRIFT" and isinstance(item, ConfigObservation))
-        or (fault_code in {"DNS_FAILURE", "DHCP_FAILURE"} and isinstance(item, LogObservation))
-        or (fault_code == "ROUTING_FAILURE" and item.observation_type == "topology")
+        or (
+            fault_code in {"DNS_FAILURE", "DHCP_FAILURE"}
+            and isinstance(item, LogObservation)
+            and service_log_matches(item, fault_code)
+        )
     ]
     inspected_refs = [item.observation_id for item in relevant]
     contradicting_refs: list[str] = []
@@ -184,6 +267,27 @@ def _review_hypothesis(
     status = "supported" if supporting_hypotheses else "inconclusive"
 
     metric_relevant = [item for item in relevant if isinstance(item, MetricObservation)]
+    grouped_metrics: dict[tuple[str, str], list[MetricObservation]] = {}
+    for item in metric_relevant:
+        grouped_metrics.setdefault((item.entity_id, item.metric_name), []).append(item)
+    temporal_summaries: list[EvidenceSignalSummary] = []
+    for (entity_id, signal), items in grouped_metrics.items():
+        by_time: dict[Any, set[float]] = {}
+        for item in items:
+            by_time.setdefault(item.timestamp, set()).add(item.value)
+        timestamps = sorted(by_time)
+        temporal_summaries.append(EvidenceSignalSummary(
+            entity_id=entity_id,
+            signal=signal,
+            sample_count=len(items),
+            time_point_count=len(timestamps),
+            source_count=len({item.source for item in items}),
+            first_seen=timestamps[0],
+            last_seen=timestamps[-1],
+            min_value=min(item.value for item in items),
+            max_value=max(item.value for item in items),
+            conflicting_time_points=sum(1 for values in by_time.values() if len(values) > 1),
+        ))
     same_time_conflicts: dict[tuple[str, str, Any], list[MetricObservation]] = {}
     for item in metric_relevant:
         same_time_conflicts.setdefault((item.entity_id, item.metric_name, item.timestamp), []).append(item)
@@ -251,7 +355,7 @@ def _review_hypothesis(
             latency_warn = float(service_rules.get("dns_latency_warning_ms", 150.0))
             has_error = any(
                 isinstance(item, LogObservation)
-                and any(token in item.message.upper() for token in ("SERVFAIL", "NXDOMAIN", "REFUSED", "TIMEOUT", "DNS_FAILURE"))
+                and any(token in item.message.upper() for token in ("SERVFAIL", "NXDOMAIN", "REFUSED", "DNS_FAILURE"))
                 for item in relevant
             )
             dns_latencies = [
@@ -275,16 +379,49 @@ def _review_hypothesis(
         f"{fault_code} review: {status}; inspected {len(relevant)} scoped observation(s), "
         f"including {len(supporting_refs)} supporting and {len(contradicting_refs)} counterevidence reference(s)."
     )
+    disposition = (
+        "resolved" if status in {"supported", "weakened"}
+        else "operator_input_needed" if contradicting_refs
+        else "signal_unavailable"
+    )
+    observed_metric_names = {item.metric_name for item in metric_relevant}
+    expected_signals = {
+        "DEVICE_OVERLOAD": ["cpu_utilization_pct", "memory_utilization_pct"],
+        "INTERFACE_FAULT": ["interface_errors", "link_flaps"],
+        "LINK_CONGESTION": ["link_utilization_pct", "queue_drops", "packet_loss_pct", "latency_ms"],
+        "WEAK_WIFI": ["rssi_dbm", "snr_db"],
+        "DNS_FAILURE": ["latency_ms", "dns_response_code"],
+        "DHCP_FAILURE": ["packet_loss_pct", "dhcp_lease_events"],
+        "CONFIG_DRIFT": ["config_baseline", "config_current_value"],
+        "ROUTING_FAILURE": ["route_state", "path_reachability"],
+    }.get(fault_code, [])
+    unavailable_signals = []
+    for signal in expected_signals:
+        available = signal in observed_metric_names
+        if signal == "dns_response_code":
+            available = any(isinstance(item, LogObservation) for item in relevant)
+        elif signal == "dhcp_lease_events":
+            available = any(isinstance(item, LogObservation) for item in relevant)
+        elif signal == "config_current_value":
+            available = any(isinstance(item, ConfigObservation) and item.config_value for item in relevant)
+        elif signal == "config_baseline":
+            available = any(isinstance(item, ConfigObservation) and item.previous_value is not None for item in relevant)
+        if not available:
+            unavailable_signals.append(signal)
     return HypothesisReview(
         fault_code=fault_code,
         status=status,
         supporting_evidence_refs=supporting_refs,
         contradicting_evidence_refs=contradicting_refs,
         inspected_evidence_refs=inspected_refs,
+        new_evidence_refs=[],
         missing_measurements=missing,
+        unavailable_signals=unavailable_signals,
+        disposition=disposition,
         discriminating_measurement=discriminators.get(
             fault_code, "A repeated, hypothesis-specific measurement."
         ),
+        temporal_summaries=temporal_summaries,
         summary=summary,
     )
 

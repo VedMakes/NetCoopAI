@@ -3,7 +3,7 @@
 from datetime import datetime, timedelta
 
 from netcoop.communication.queries import PeerQuery
-from netcoop.communication.tasks import InvestigationTask
+from netcoop.communication.tasks import DiagnosticTaskArtifact, InvestigationTask
 from netcoop.models.enums import (
     ConfidenceCategory,
     QueryStatus,
@@ -35,6 +35,47 @@ def make_metric(
         unit=unit,
         timestamp=timestamp,
     )
+
+
+def test_hypothesis_review_returns_provenance_and_explicitly_marks_no_new_measurement(sample_utc_time):
+    repo = SQLiteRepository(":memory:")
+    incident_id = "INC-REVIEW-ARTIFACT"
+    observations = [
+        make_metric("REV-UTIL-1", "SW_CORE:Gi0/2", "link_utilization_pct", 94.0, "percent", sample_utc_time, incident_id),
+        make_metric("REV-UTIL-2", "SW_CORE:Gi0/2", "link_utilization_pct", 42.0, "percent", sample_utc_time, incident_id).model_copy(update={"source": "collector-b"}),
+        make_metric("REV-DROP-1", "SW_CORE:Gi0/2", "queue_drops", 120.0, "count", sample_utc_time, incident_id),
+    ]
+    for observation in observations:
+        repo.insert_observation(observation)
+    tower = PerformanceTower(repository=repo)
+    task = InvestigationTask(
+        task_id="TASK-REVIEW-ARTIFACT",
+        incident_id=incident_id,
+        requester="supervisor",
+        assignee=TowerId.PERFORMANCE,
+        capability="performance.challenge_congestion_hypothesis",
+        objective={"hypothesis_code": "LINK_CONGESTION", "target_entities": ["SW_CORE:Gi0/2"]},
+        expected_result_schema="netcoop://schemas/tasks/diagnostic-artifact/1.1",
+        created_at=sample_utc_time,
+        updated_at=sample_utc_time,
+    )
+
+    result = tower.execute_task(task)
+    artifact = DiagnosticTaskArtifact.model_validate(result.result)
+    review = artifact.hypothesis_reviews[0]
+    context_by_id = {item.observation_id: item for item in artifact.evidence_context}
+
+    assert review.fault_code == "LINK_CONGESTION"
+    assert set(review.supporting_evidence_refs) <= set(result.evidence_refs)
+    assert set(review.inspected_evidence_refs) <= set(context_by_id)
+    assert context_by_id["REV-UTIL-1"].source == "test"
+    assert context_by_id["REV-UTIL-1"].observed_at == sample_utc_time
+    assert review.new_evidence_refs == []
+    utilization_summary = next(item for item in review.temporal_summaries if item.signal == "link_utilization_pct")
+    assert utilization_summary.time_point_count == 1
+    assert utilization_summary.source_count == 2
+    assert utilization_summary.conflicting_time_points == 1
+    assert "did not collect a live measurement" in (context_by_id["REV-UTIL-1"].limitation or "")
 
 
 def test_normal_telemetry_produces_no_severe_faults(sample_utc_time):

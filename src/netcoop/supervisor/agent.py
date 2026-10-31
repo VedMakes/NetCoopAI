@@ -108,6 +108,17 @@ class DeterministicRCAProvider:
                 "ROUTING_FAILURE": (TowerId.CONNECTIVITY, "ANALYZE_REACHABILITY"),
                 "UPLINK_SATURATION": (TowerId.CONNECTIVITY, "connectivity.inspect_common_upstream"),
             }
+            required_signals = {
+                "LINK_CONGESTION": ["link_utilization_pct", "queue_drops", "packet_loss_pct", "latency_ms"],
+                "WEAK_WIFI": ["rssi_dbm", "snr_db"],
+                "DEVICE_OVERLOAD": ["cpu_utilization_pct", "memory_utilization_pct"],
+                "INTERFACE_FAULT": ["interface_errors", "link_flaps"],
+                "DNS_FAILURE": ["latency_ms", "dns_response_code"],
+                "DHCP_FAILURE": ["dhcp_pool_utilization_pct", "dhcp_lease_events"],
+                "CONFIG_DRIFT": ["config_baseline", "config_current_value"],
+                "ROUTING_FAILURE": ["route_state", "path_reachability"],
+                "UPLINK_SATURATION": ["link_utilization_pct", "queue_drops"],
+            }
             for conflict in conflicts:
                 for index, fault_code in enumerate(conflict.competing_hypotheses):
                     route = challenge_capabilities.get(fault_code)
@@ -130,6 +141,14 @@ class DeterministicRCAProvider:
                                 f"Name the measurement that would distinguish it from the competing hypothesis."
                             ),
                             "discriminating_measurement": conflict.disposition,
+                            "required_signals": required_signals.get(fault_code, []),
+                            "evidence_mode": "stored_observations_only",
+                            "expected_information_gain": 0.7,
+                            "estimated_cost": 1.0,
+                            "expected_outcomes": [
+                                f"Evidence supports {fault_code}",
+                                f"Evidence weakens {fault_code} or favors a competing hypothesis",
+                            ],
                         },
                     })
 
@@ -297,9 +316,35 @@ class DeterministicRCAProvider:
         # Sort hypotheses by adjusted priority * confidence_score
         reviews: dict[str, dict[str, Any]] = {}
         for entry in dossier.task_history:
-            for review in entry.get("hypothesis_reviews", []):
+            result = entry.get("result") or {}
+            for review in entry.get("hypothesis_reviews", result.get("hypothesis_reviews", [])):
                 if isinstance(review, dict) and review.get("fault_code"):
                     reviews[review["fault_code"]] = review
+
+        for conflict in conflicts:
+            conflicting_codes = [
+                code for code in conflict.competing_hypotheses
+                if code in {hypothesis.fault_code for hypothesis in hypotheses}
+            ]
+            if len(conflicting_codes) < 2:
+                continue
+            conflict_reviews = [reviews.get(code) for code in conflicting_codes]
+            unavailable_codes = {
+                (entry.get("objective") or {}).get("hypothesis_code")
+                for entry in dossier.task_history
+                if entry.get("status") in {"SIGNAL_UNAVAILABLE", "FAILED", "REJECTED"}
+            }
+            all_unresolved = all(
+                (review is not None and review.get("status") == "inconclusive")
+                or code in unavailable_codes
+                for code, review in zip(conflicting_codes, conflict_reviews, strict=True)
+            )
+            if all_unresolved:
+                return self._abstain_unresolved(
+                    dossier,
+                    "Competing hypotheses remain inconclusive after bounded evidence review; "
+                    "a fresh discriminating measurement or operator confirmation is required.",
+                )
 
         def score_hyp(h: Hypothesis) -> float:
             base_prio = priority_map.get(h.fault_code, 40)
@@ -399,6 +444,7 @@ class DeterministicRCAProvider:
             recommended_actions=rec_actions,
             abstain_reason=None,
             requested_tasks=[],
+            operator_questions=self._operator_questions(dossier),
             created_at=datetime.now(timezone.utc),
         )
 
@@ -449,6 +495,58 @@ class DeterministicRCAProvider:
                 disclosures.append(f"Task {entry.get('task_id')} limitation: {analysis['warning']}")
         return disclosures
 
+    @staticmethod
+    def _operator_questions(dossier: IncidentDossier) -> list[str]:
+        """Turn unavailable or conflicting task evidence into concrete operator follow-ups."""
+        hypotheses = {item.fault_code: item for item in dossier.hypotheses}
+        questions: list[str] = []
+        conflict_checks: list[tuple[str, str]] = []
+        for entry in dossier.task_history:
+            result = entry.get("result") or {}
+            if entry.get("status") == "SIGNAL_UNAVAILABLE":
+                objective = entry.get("objective") or {}
+                missing = ", ".join(objective.get("required_signals", [])) or "the required measurement"
+                targets = ", ".join(objective.get("target_entities", [])) or "the affected segment"
+                questions.append(
+                    f"Can you provide {missing} for {targets}, including timestamps and collector/source names?"
+                )
+            for review in entry.get("hypothesis_reviews", result.get("hypothesis_reviews", [])):
+                if not isinstance(review, dict) or review.get("disposition") not in {
+                    "operator_input_needed", "signal_unavailable"
+                }:
+                    continue
+                fault_code = str(review.get("fault_code", "the leading network hypothesis"))
+                hypothesis = hypotheses.get(fault_code)
+                entities = hypothesis.suspected_entities if hypothesis else dossier.affected_entities
+                if review.get("disposition") == "operator_input_needed":
+                    targets = ", ".join(dict.fromkeys(entity.partition(":")[0] for entity in entities))
+                    measurement = review.get("discriminating_measurement") or "a repeated, time-stamped measurement"
+                    conflict_checks.append((targets or "the affected segment", measurement))
+                else:
+                    target = ", ".join(entities) or "the affected segment"
+                    unavailable = review.get("unavailable_signals", [])
+                    measurement = "; ".join(unavailable) if unavailable else (
+                        (review.get("missing_measurements") or [None])[0]
+                        or review.get("discriminating_measurement")
+                        or "a fresh, time-stamped measurement for this fault"
+                    )
+                    question = (
+                        f"Can you provide {measurement} for {target}, including its timestamp and source?"
+                    )
+                    if question not in questions:
+                        questions.append(question)
+        if conflict_checks:
+            targets = ", ".join(dict.fromkeys(target for target, _ in conflict_checks))
+            measurements = " and ".join(dict.fromkeys(
+                measurement.rstrip(" .") for _, measurement in conflict_checks
+            ))
+            questions.insert(
+                0,
+                f"Can you confirm which sources are authoritative for conflicting readings on {targets}, then "
+                f"provide aligned samples for {measurements} with timestamps and source IDs?",
+            )
+        return questions[:3]
+
     def _abstain_unresolved(self, dossier: IncidentDossier, reason: str) -> tuple[SupervisorProposal, ClaimEvidenceManifest]:
         proposal = SupervisorProposal(
             proposal_id=generate_id("PROP"),
@@ -458,10 +556,11 @@ class DeterministicRCAProvider:
             affected_entities=dossier.affected_entities,
             supporting_finding_refs=[],
             confidence_category=ConfidenceCategory.INSUFFICIENT,
-            alternative_causes=[],
+            alternative_causes=list(dict.fromkeys(hypothesis.fault_code for hypothesis in dossier.hypotheses)),
             recommended_actions=["Perform manual triage and verify cross-domain telemetry sources."],
             abstain_reason=reason,
             requested_tasks=[],
+            operator_questions=self._operator_questions(dossier),
             created_at=datetime.now(timezone.utc),
         )
         manifest = ClaimEvidenceManifest(

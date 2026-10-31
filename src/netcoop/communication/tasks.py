@@ -2,6 +2,7 @@
 
 from collections.abc import Callable
 from datetime import datetime, timezone
+from enum import Enum
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -10,7 +11,7 @@ from netcoop.communication.events import EventEnvelope
 from netcoop.models.enums import TaskStatus, TowerId
 from netcoop.utils.id_generator import generate_id
 
-DIAGNOSTIC_TASK_ARTIFACT_SCHEMA = "netcoop://schemas/tasks/diagnostic-artifact/1.0"
+DIAGNOSTIC_TASK_ARTIFACT_SCHEMA = "netcoop://schemas/tasks/diagnostic-artifact/1.1"
 
 
 def _ensure_utc(dt: datetime) -> datetime:
@@ -21,6 +22,16 @@ def _ensure_utc(dt: datetime) -> datetime:
 
 class InvalidTaskTransitionError(ValueError):
     """Raised when an illegal investigation task status transition is attempted."""
+
+
+class InvestigationDisposition(str, Enum):
+    """Typed next-step contract for evidence review and orchestration control."""
+
+    RESOLVED = "resolved"
+    CONTINUE_WITH_NEW_TASK = "continue_with_new_task"
+    SIGNAL_UNAVAILABLE = "signal_unavailable"
+    OPERATOR_INPUT_NEEDED = "operator_input_needed"
+    ABSTAIN = "abstain"
 
 
 ALLOWED_TRANSITIONS: dict[TaskStatus, set[TaskStatus]] = {
@@ -154,6 +165,28 @@ class TaskResult(BaseModel):
         return _ensure_utc(v)
 
 
+class EvidenceSignalSummary(BaseModel):
+    """Bounded temporal summary used to distinguish persistence from a snapshot."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    entity_id: str
+    signal: str
+    sample_count: int
+    time_point_count: int
+    source_count: int
+    first_seen: datetime
+    last_seen: datetime
+    min_value: float
+    max_value: float
+    conflicting_time_points: int = 0
+
+    @field_validator("first_seen", "last_seen")
+    @classmethod
+    def validate_summary_timestamps(cls, value: datetime) -> datetime:
+        return _ensure_utc(value)
+
+
 class HypothesisReview(BaseModel):
     """Evidence-grounded review of a hypothesis, including what could falsify it."""
 
@@ -164,9 +197,33 @@ class HypothesisReview(BaseModel):
     supporting_evidence_refs: list[str] = Field(default_factory=list)
     contradicting_evidence_refs: list[str] = Field(default_factory=list)
     inspected_evidence_refs: list[str] = Field(default_factory=list)
+    new_evidence_refs: list[str] = Field(default_factory=list)
     missing_measurements: list[str] = Field(default_factory=list)
+    unavailable_signals: list[str] = Field(default_factory=list)
+    disposition: InvestigationDisposition = InvestigationDisposition.CONTINUE_WITH_NEW_TASK
     discriminating_measurement: str
+    temporal_summaries: list[EvidenceSignalSummary] = Field(default_factory=list)
     summary: str
+
+
+class TaskEvidenceItem(BaseModel):
+    """Provenance-rich reference to an observation used by a specialist task."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    observation_id: str
+    observed_at: datetime
+    source: str
+    entity_id: str
+    signal: str
+    value: Any = None
+    unit: str | None = None
+    limitation: str | None = None
+
+    @field_validator("observed_at")
+    @classmethod
+    def validate_observed_at(cls, value: datetime) -> datetime:
+        return _ensure_utc(value)
 
 
 class DiagnosticTaskArtifact(BaseModel):
@@ -185,6 +242,8 @@ class DiagnosticTaskArtifact(BaseModel):
     summary: str
     analysis: dict[str, Any] | None = None
     hypothesis_reviews: list[HypothesisReview] = Field(default_factory=list)
+    evidence_context: list[TaskEvidenceItem] = Field(default_factory=list)
+    unavailable_signals: list[str] = Field(default_factory=list)
 
 
 TaskHandler = Callable[[InvestigationTask], TaskResult]

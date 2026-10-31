@@ -225,6 +225,11 @@ def test_report_separates_entities_with_cited_symptoms_from_predicted_impact():
     assert "HOSTEL_ZONE_A" in report.inferred_affected_entities
     assert set(report.observed_symptom_entities) <= set(report.affected_devices)
     assert set(report.inferred_affected_entities) <= set(report.affected_devices)
+    assert report.directly_affected_entities
+    predicted = next(item for item in report.predicted_impacts if item.entity_id == "HOSTEL_ZONE_A")
+    assert predicted.certainty == "candidate"
+    assert predicted.relation == "dns"
+    assert predicted.topology_evidence_refs
 
 
 def test_compound_dns_and_dhcp_incident_queries_each_declared_service_dependency():

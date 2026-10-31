@@ -53,6 +53,7 @@ class SupervisorProposal(BaseModel):
     recommended_actions: list[str] = Field(default_factory=list)
     abstain_reason: str | None = None
     requested_tasks: list[dict[str, Any]] = Field(default_factory=list)
+    operator_questions: list[str] = Field(default_factory=list)
     created_at: datetime
 
     @field_validator("created_at")
@@ -86,6 +87,20 @@ class SupportingEvidenceItem(BaseModel):
     unit: str | None = None
     observed_at: datetime | None = None
     source: str | None = None
+
+
+class PredictedImpact(BaseModel):
+    """Topology-based candidate impact, explicitly distinct from observed impact."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    entity_id: str
+    relation: str
+    inferred_from: str
+    path: list[str] = Field(default_factory=list)
+    hops: int = 1
+    topology_evidence_refs: list[str] = Field(default_factory=list)
+    certainty: Literal["candidate"] = "candidate"
 
 
 class PathTraceItem(BaseModel):
@@ -136,6 +151,7 @@ class FinalReport(BaseModel):
     suspected_root_cause: str
     confidence: float = Field(..., ge=0.0, le=1.0)
     affected_devices: list[str] = Field(default_factory=list)
+    directly_affected_entities: list[str] = Field(default_factory=list)
     observed_symptom_entities: list[str] = Field(default_factory=list)
     supporting_evidence: list[SupportingEvidenceItem] = Field(default_factory=list)
     alternative_causes: list[str] = Field(default_factory=list)
@@ -145,6 +161,8 @@ class FinalReport(BaseModel):
     confidence_category: ConfidenceCategory = ConfidenceCategory.MODERATE
     concurrent_causes: list[str] = Field(default_factory=list)
     inferred_affected_entities: list[str] = Field(default_factory=list)
+    predicted_impacts: list[PredictedImpact] = Field(default_factory=list)
+    operator_questions: list[str] = Field(default_factory=list)
     data_quality_warnings: list[str] = Field(default_factory=list)
     orchestration_warnings: list[str] = Field(default_factory=list)
     peer_interactions: list[dict[str, Any]] = Field(default_factory=list)

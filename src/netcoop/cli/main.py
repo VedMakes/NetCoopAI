@@ -808,15 +808,28 @@ def diagnose(
     confidence_bar = f"[magenta]{'▰' * confidence_filled}[/magenta][dim]{'▱' * (10 - confidence_filled)}[/dim]"
     observed_text = ", ".join(report.observed_symptom_entities) or "No cited symptom entities"
     predicted_text = ", ".join(report.inferred_affected_entities) or "No topology-based candidates"
+    impact_by_entity = {item.entity_id: item for item in report.predicted_impacts}
+    predicted_details = [
+        f"  • {entity}: {' → '.join(impact_by_entity[entity].path)} "
+        f"[map evidence: {', '.join(impact_by_entity[entity].topology_evidence_refs)}]"
+        for entity in report.inferred_affected_entities if entity in impact_by_entity
+    ]
     diagnosis_content = (
         f"[bold]Suspected primary cause[/bold]\n[bold {status_style}]{report.suspected_root_cause}[/bold {status_style}]\n\n"
         f"[bold]Confidence[/bold]  {confidence_bar}  {report.confidence:.0%}\n\n"
         f"[bold cyan]Observed symptoms[/bold cyan]  {observed_text}\n"
         f"[bold magenta]Predicted impact[/bold magenta]  {predicted_text}\n"
+        f"[bold]Directly affected[/bold]  {', '.join(report.directly_affected_entities) or 'Not established'}\n"
         f"[dim]Combined affected entities: {', '.join(report.affected_devices) if report.affected_devices else 'None detected'}[/dim]\n\n"
         f"[bold]Recommended actions[/bold]\n"
         + "\n".join(f"  {i+1}. {a}" for i, a in enumerate(report.recommended_actions))
     )
+    if report.operator_questions:
+        diagnosis_content += "\n\n[bold yellow]Information needed from operator[/bold yellow]\n" + "\n".join(
+            f"  • {question}" for question in report.operator_questions
+        )
+    if predicted_details:
+        diagnosis_content += "\n\n[dim]Topology inference paths (candidate impact)[/dim]\n" + "\n".join(predicted_details)
     console.print(Panel(
         diagnosis_content, title="✦ Certified Diagnosis", border_style="cyan", padding=(1, 2)
     ))

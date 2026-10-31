@@ -22,14 +22,14 @@ def render_markdown_report(report: FinalReport, gate_result: Any | None = None) 
         "",
         f"**Primary Suspected Root Cause:** `{report.suspected_root_cause}`",
         "",
-        "**Affected entities (direct findings plus topology inference):**",
+        "**Directly affected entities (supported by findings):**",
     ]
 
-    if report.affected_devices:
-        for dev in report.affected_devices:
+    if report.directly_affected_entities:
+        for dev in report.directly_affected_entities:
             lines.append(f"- `{dev}`")
     else:
-        lines.append("- None detected / not applicable")
+        lines.append("- None identified directly")
 
     lines.extend(["", "**Entities with cited symptom evidence:**"])
     if report.observed_symptom_entities:
@@ -49,7 +49,18 @@ def render_markdown_report(report: FinalReport, gate_result: Any | None = None) 
             "", "**Predicted affected entities (inferred from topology):**",
             "These are predicted impact candidates, not confirmed user impact.",
         ])
-        lines.extend(f"- `{entity}`" for entity in report.inferred_affected_entities)
+        impacts_by_entity = {item.entity_id: item for item in report.predicted_impacts}
+        for entity in report.inferred_affected_entities:
+            impact = impacts_by_entity.get(entity)
+            detail = (
+                f" via `{impact.inferred_from}` ({impact.relation}; path `{' → '.join(impact.path)}`; "
+                f"topology evidence {', '.join(impact.topology_evidence_refs)})" if impact else ""
+            )
+            lines.append(f"- `{entity}` — candidate{detail}")
+
+    if report.operator_questions:
+        lines.extend(["", "**Information needed from the operator:**"])
+        lines.extend(f"- {question}" for question in report.operator_questions)
 
     if report.network_profile:
         lines.extend([

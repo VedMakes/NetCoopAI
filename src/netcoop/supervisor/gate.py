@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any
 from netcoop.models.enums import ConfidenceCategory, FindingStatus, ProposalDecision
 from netcoop.models.findings import Finding
 from netcoop.models.observations import CanonicalObservation, MetricObservation, TopologyObservation
-from netcoop.models.reports import FinalReport, SupportingEvidenceItem
+from netcoop.models.reports import FinalReport, PredictedImpact, SupportingEvidenceItem
 from netcoop.supervisor.models import GateCheckResult, GateIssue, GateOutcome, GateResult
 
 _GATE_ISSUE_POLICY: dict[str, tuple[str, bool]] = {
@@ -67,24 +67,80 @@ def _infer_affected_entities(
     roots: list[str], observations: list[CanonicalObservation]
 ) -> list[str]:
     """Infer direct impact from explicit topology and dependency relationships."""
+    return list(dict.fromkeys(item.entity_id for item in _infer_impact_records(roots, observations)))
+
+
+def _infer_impact_records(
+    roots: list[str], observations: list[CanonicalObservation]
+) -> list[PredictedImpact]:
+    """Traverse declared dependencies/links, retaining the path behind each candidate."""
     root_set = set(roots)
-    inferred: list[str] = []
+    root_devices = {root.partition(":")[0] for root in roots if ":" in root}
+    dependency_types = {
+        "dns", "dhcp", "wireless_access", "uplink", "default_gateway", "depends_on",
+    }
+    physical_types = {"connected_to", "ethernet", "trunk", "wireless", "fiber", "uplink_of"}
+    adjacency: dict[str, list[tuple[str, str, str, str]]] = {}
+
+    def add_edge(source: str, target: str, relation: str, evidence_ref: str, kind: str) -> None:
+        adjacency.setdefault(source, []).append((target, relation, evidence_ref, kind))
+
     for obs in observations:
         if not isinstance(obs, TopologyObservation):
             continue
-        if obs.interface_name in root_set:
-            inferred.extend([obs.source_entity, obs.target_entity])
-        elif obs.relationship_type in {"dns", "dhcp", "wireless_access"}:
-            if obs.target_entity in root_set:
-                inferred.append(obs.source_entity)
-            if obs.relationship_type == "wireless_access" and obs.source_entity in root_set:
-                inferred.append(obs.target_entity)
-        elif obs.relationship_type == "connected_to":
-            if obs.source_entity in root_set:
-                inferred.append(obs.target_entity)
-            if obs.target_entity in root_set:
-                inferred.append(obs.source_entity)
-    return list(dict.fromkeys(entity for entity in inferred if entity not in root_set))
+        relation = obs.relationship_type.casefold()
+        if relation in dependency_types:
+            # Topology records consumer -> provider; impact propagates provider -> consumer.
+            add_edge(obs.target_entity, obs.source_entity, relation, obs.observation_id, "dependency")
+        elif relation in physical_types or relation == "connected_to":
+            add_edge(obs.source_entity, obs.target_entity, relation, obs.observation_id, "physical")
+            add_edge(obs.target_entity, obs.source_entity, relation, obs.observation_id, "physical")
+
+        # Capture-folder links identify the source endpoint's interface. Connect an
+        # interface-level root directly to its peer, without labeling its parent device impacted.
+        interface = obs.interface_name
+        if interface:
+            for root in roots:
+                if root == interface or root.endswith(f":{interface}") or interface.endswith(f":{root}"):
+                    add_edge(root, obs.target_entity, relation or "interface_link", obs.observation_id, "physical")
+
+    results: dict[str, PredictedImpact] = {}
+    max_hops = 3
+    max_candidates = 50
+    for root in roots:
+        root_edges = adjacency.get(root, [])
+        dependency_mode = any(kind == "dependency" for _target, _rel, _ref, kind in root_edges)
+        queue: list[tuple[str, list[str], list[str], list[str]]] = [(root, [root], [], [])]
+        visited_depth = {root: 0}
+        while queue:
+            current, path, relations, evidence_refs = queue.pop(0)
+            hops = len(relations)
+            if hops >= max_hops:
+                continue
+            for target, relation, evidence_ref, edge_kind in adjacency.get(current, []):
+                if dependency_mode and edge_kind != "dependency":
+                    continue
+                next_depth = hops + 1
+                if target in root_set or target in root_devices or target in path:
+                    continue
+                if visited_depth.get(target, max_hops + 1) <= next_depth:
+                    continue
+                visited_depth[target] = next_depth
+                next_path = [*path, target]
+                next_relations = [*relations, relation]
+                next_evidence = [*evidence_refs, evidence_ref]
+                results.setdefault(target, PredictedImpact(
+                    entity_id=target,
+                    relation=" → ".join(next_relations),
+                    inferred_from=root,
+                    path=next_path,
+                    hops=next_depth,
+                    topology_evidence_refs=next_evidence,
+                ))
+                if len(results) >= max_candidates:
+                    return list(results.values())
+                queue.append((target, next_path, next_relations, next_evidence))
+    return sorted(results.values(), key=lambda item: (item.hops, item.entity_id))
 
 
 class EvidenceReleaseGate:
@@ -160,9 +216,11 @@ class EvidenceReleaseGate:
                 suspected_root_cause=f"ABSTAIN: {proposal.abstain_reason or 'Insufficient diagnostic evidence'}",
                 confidence=0.0,
                 affected_devices=proposal.affected_entities,
+                directly_affected_entities=proposal.affected_entities,
                 observed_symptom_entities=[],
                 supporting_evidence=[],
                 alternative_causes=proposal.alternative_causes,
+                operator_questions=proposal.operator_questions,
                 recommended_actions=proposal.recommended_actions,
                 evidence_sources=[],
                 limitations=["Diagnostic engines abstained due to ambiguity or insufficient evidence."],
@@ -452,10 +510,13 @@ class EvidenceReleaseGate:
                 affected_devices=list(dict.fromkeys(
                     proposal.affected_entities + _infer_affected_entities(proposal.affected_entities, observations_for_impact)
                 )),
+                directly_affected_entities=proposal.affected_entities,
                 observed_symptom_entities=list(dict.fromkeys(
                     item.entity_id for item in evidence_items if item.entity_id
                 )),
                 inferred_affected_entities=_infer_affected_entities(proposal.affected_entities, observations_for_impact),
+                predicted_impacts=_infer_impact_records(proposal.affected_entities, observations_for_impact),
+                operator_questions=proposal.operator_questions,
                 supporting_evidence=evidence_items,
                 alternative_causes=proposal.alternative_causes,
                 recommended_actions=proposal.recommended_actions,
