@@ -12,6 +12,8 @@ from rich.table import Table
 from netcoop import __version__
 from netcoop.communication.registry import CapabilityRegistry
 from netcoop.communication.vocabulary import load_vocabulary
+from netcoop.features.pipeline import FeaturePipeline
+from netcoop.ingestion.loaders import TelemetryLoader
 from netcoop.models.observations import (
     ConfigObservation,
     LogObservation,
@@ -150,6 +152,62 @@ def validate(
             f"  • Config: {validated_configs}"
         )
         console.print(Panel(panel_content, title="Validation Success", border_style="green"))
+
+
+@app.command()
+def ingest(
+    file_path: Path = typer.Argument(
+        ...,
+        help="Path to telemetry file (.json, .csv, .jsonl) to ingest.",
+        exists=True,
+        readable=True,
+    ),
+    incident_id: str = typer.Option("INC-CLI-001", "--incident-id", "-i", help="Incident ID to associate"),
+    db_path: Path | None = typer.Option(None, "--db", help="Optional SQLite database to persist into"),
+):
+    """Loads, normalizes, and extracts derived features from a telemetry file."""
+    loader = TelemetryLoader()
+    console.print(f"[bold]Ingesting:[/bold] {file_path} for incident [cyan]{incident_id}[/cyan]...")
+
+    batch = loader.load_file(file_path, incident_id=incident_id)
+
+    # Run feature extraction pipeline
+    pipeline = FeaturePipeline()
+    features = pipeline.extract_features(batch.observations, incident_id=incident_id)
+
+    # Optional persistence into SQLite
+    if db_path:
+        repo = SQLiteRepository(db_path)
+        repo.record_incident(incident_id, status="active", description=f"Ingested from {file_path.name}")
+        for obs in batch.observations:
+            repo.insert_observation(obs)
+        console.print(f"[green]Persisted {len(batch.observations)} observations to SQLite at {db_path}[/green]")
+
+    table = Table(title=f"Ingestion & Feature Summary: {incident_id}")
+    table.add_column("Category", style="bold")
+    table.add_column("Count", style="green")
+    table.add_column("Details")
+
+    table.add_row("Total Observations", str(batch.total_count), "Normalized into canonical models")
+    table.add_row("Metric Observations", str(batch.metric_count), "Strict units and bounds verified")
+    table.add_row("Log Observations", str(batch.log_count), "Normalized timestamps and log levels")
+    table.add_row("Topology Observations", str(batch.topology_count), "Entities and relationships mapped")
+    table.add_row("Config Observations", str(batch.config_count), "Configuration keys and values")
+    table.add_row("Derived Features", str(len(features)), "Rolling stats, MAD, utilization, ratios")
+
+    if batch.warnings:
+        table.add_row("Quality Warnings", f"[yellow]{len(batch.warnings)}[/yellow]", "Non-blocking data quality notices")
+    if batch.quarantined_records:
+        table.add_row("Quarantined Records", f"[red]{len(batch.quarantined_records)}[/red]", "Malformed records isolated without crashing")
+
+    console.print(table)
+
+    if batch.warnings:
+        console.print("\n[bold yellow]Recent Quality Warnings:[/bold yellow]")
+        for w in batch.warnings[:5]:
+            console.print(f"  • [{w.warning_type}] {w.message}")
+        if len(batch.warnings) > 5:
+            console.print(f"  ... and {len(batch.warnings) - 5} more warnings.")
 
 
 if __name__ == "__main__":

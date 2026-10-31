@@ -42,6 +42,13 @@ def load_vocabulary(force_reload: bool = False) -> dict[str, Any]:
     return data
 
 
+def get_metric_definition(metric_name: str) -> dict[str, Any] | None:
+    """Returns the canonical vocabulary specification for a metric, or None if not found."""
+    vocab = load_vocabulary()
+    metrics = vocab.get("metrics", {})
+    return metrics.get(metric_name)
+
+
 def validate_metric_and_unit(metric_name: str, unit: str, value: float) -> None:
     """Validates that metric_name exists in canonical vocabulary, unit matches, and value is within bounds."""
     vocab = load_vocabulary()

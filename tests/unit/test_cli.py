@@ -81,3 +81,14 @@ def test_cli_validate_failure(tmp_path: Path):
     result = runner.invoke(app, ["validate", str(fixture_file)])
     assert result.exit_code != 0
     assert "Validation failed" in result.stdout
+
+
+def test_cli_ingest_success(tmp_path: Path):
+    fixture_path = Path("fixtures/sample_incident.json")
+    db_path = tmp_path / "cli_test.db"
+
+    result = runner.invoke(app, ["ingest", str(fixture_path), "--incident-id", "INC-INGEST-CLI", "--db", str(db_path)])
+    assert result.exit_code == 0
+    assert "Ingestion & Feature Summary: INC-INGEST-CLI" in result.stdout
+    assert "Persisted 9 observations to SQLite" in result.stdout
+    assert db_path.exists()

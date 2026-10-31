@@ -2,17 +2,17 @@
 
 > Update this file at every phase start, implementation handoff, review verdict and blocker. `docs/COLLAB_LOG.md` is the append-only history; this file is only the current-state summary.
 
-- **Current phase:** Phase 1
-- **Phase title:** Scaffold, contracts and SQLite foundation
+- **Current phase:** Phase 2
+- **Phase title:** Ingestion, normalization and feature pipeline
 - **Status:** `AWAITING_REVIEW`
-- **Implementation owner:** Friend B
-- **Reviewer:** Friend A
+- **Implementation owner:** Friend A
+- **Reviewer:** Friend B
 - **Shared branch:** `hackathon/team-integration`
-- **Last accepted phase:** Phase 0 (VERIFIED by Friend B)
-- **Latest implementation commit:** `6b32422`
-- **Latest review commit:** Review in progress
+- **Last accepted phase:** Phase 1 (VERIFIED by Friend A)
+- **Latest implementation commit:** Phase 2 handoff
+- **Latest review commit:** Review of Phase 1 completed
 - **Blocking issues:** None recorded
-- **Next phase:** Phase 2, owned by Friend A
+- **Next phase:** Phase 3, owned by Friend B
 
 ## Status meanings
 
@@ -26,12 +26,12 @@
 
 ## Current phase checklist
 
-- [x] Owner confirmed session designation (`TEAMMATE_ID = B`).
-- [x] Reviewer independently verified Phase 0 handoff.
+- [x] Owner confirmed session designation (`TEAMMATE_ID = A`).
+- [x] Reviewer independently verified Phase 1 handoff.
 - [x] Owner inspected repository, tools, and docs.
 - [x] Shared branch `hackathon/team-integration` active.
 - [x] Implementation completed.
-- [x] Required tests run and recorded (41/41 unit tests pass, ruff clean, CLI verified).
+- [x] Required tests run and recorded (81/81 unit tests pass, ruff clean, CLI verified).
 - [x] Owner appended implementation handoff to `COLLAB_LOG.md`.
 - [ ] Owner pushed commit to shared branch.
 - [ ] Reviewer pulled exact commit.
@@ -44,8 +44,9 @@
 | Phase | Owner | Reviewer | State |
 |---|---|---|---|
 | 0 | Friend A | Friend B | VERIFIED |
-| 1 | Friend B | Friend A | AWAITING_REVIEW |
-| 2 | Friend A | Friend B | NOT_STARTED |
+| 1 | Friend B | Friend A | VERIFIED |
+| 2 | Friend A | Friend B | AWAITING_REVIEW |
+| 3 | Friend B | Friend A | NOT_STARTED |
 | 3 | Friend B | Friend A | NOT_STARTED |
 | 4 | Friend A | Friend B | NOT_STARTED |
 | 5 | Friend B | Friend A | NOT_STARTED |
