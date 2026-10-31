@@ -47,8 +47,8 @@ New entries are appended at the top.
   - `uv run netcoop demo`: PASS.
   - `uv run netcoop scenarios`: PASS.
 - **Known issues:** None.
-- **Ending commit:** PENDING_COMMIT (will be recorded upon commit)
-- **Push verification:** PENDING_PUSH
+- **Ending commit:** `092ba3a`
+- **Push verification:** Pushed and verified at `origin/feature/netcoop-dashboard` (commit `092ba3a`).
 - **Next phase:** PHASE 4 — Page 2: Incident Intelligence (Telemetry charts, tower finding cards, fabric logs, gate audit, report renderer).
 
 ---
