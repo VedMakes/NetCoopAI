@@ -11,8 +11,18 @@ from typing import TYPE_CHECKING, Any
 
 from netcoop.models.enums import ConfidenceCategory, FindingStatus, ProposalDecision
 from netcoop.models.findings import Finding
-from netcoop.models.observations import CanonicalObservation, MetricObservation, TopologyObservation
-from netcoop.models.reports import FinalReport, PredictedImpact, SupportingEvidenceItem
+from netcoop.models.observations import (
+    CanonicalObservation,
+    LogObservation,
+    MetricObservation,
+    TopologyObservation,
+)
+from netcoop.models.reports import (
+    FinalReport,
+    PredictedImpact,
+    ReportStatus,
+    SupportingEvidenceItem,
+)
 from netcoop.supervisor.models import GateCheckResult, GateIssue, GateOutcome, GateResult
 
 _GATE_ISSUE_POLICY: dict[str, tuple[str, bool]] = {
@@ -24,6 +34,7 @@ _GATE_ISSUE_POLICY: dict[str, tuple[str, bool]] = {
     "observation_existence": ("invalid_observation_reference", True),
     "finding_scope": ("finding_scope_mismatch", False),
     "observation_scope": ("observation_scope_mismatch", False),
+    "claim_evidence_semantic_consistency": ("semantic_evidence_mismatch", False),
     "finding_not_superseded": ("stale_finding", False),
     "finding_not_retracted": ("retracted_finding", False),
     "contradiction_disclosure": ("unresolved_hypothesis", True),
@@ -210,10 +221,23 @@ class EvidenceReleaseGate:
                     )
                 )
 
+            reason = proposal.abstain_reason or "Insufficient diagnostic evidence"
+            if proposal.abstain_type:
+                diag_status = proposal.abstain_type
+            elif "Normal telemetry" in reason:
+                diag_status = "NORMAL"
+            elif any(kw in reason.lower() for kw in ("inconclusive", "competing", "unresolved", "ambiguity")):
+                diag_status = "ABSTAIN_UNRESOLVED"
+            else:
+                diag_status = "INSUFFICIENT_EVIDENCE"
+
+            rep_status = "insufficient_evidence"
+
             final_report = FinalReport(
                 incident_id=inc_id,
-                status="insufficient_evidence",
-                suspected_root_cause=f"ABSTAIN: {proposal.abstain_reason or 'Insufficient diagnostic evidence'}",
+                status=rep_status,
+                diagnostic_status=diag_status,
+                suspected_root_cause=f"ABSTAIN: {reason}",
                 confidence=0.0,
                 affected_devices=proposal.affected_entities,
                 directly_affected_entities=proposal.affected_entities,
@@ -223,7 +247,7 @@ class EvidenceReleaseGate:
                 operator_questions=proposal.operator_questions,
                 recommended_actions=proposal.recommended_actions,
                 evidence_sources=[],
-                limitations=["Diagnostic engines abstained due to ambiguity or insufficient evidence."],
+                limitations=[f"Supervisor decision: {diag_status.lower().replace('_', ' ')}."],
                 confidence_category=ConfidenceCategory.INSUFFICIENT,
                 data_quality_warnings=data_quality_warnings,
                 orchestration_warnings=orchestration_warnings,
@@ -358,6 +382,52 @@ class EvidenceReleaseGate:
                     warn = f"Finding '{f.finding_id}' links observation '{obs_id}' which is not in known observations."
                     warnings.append(warn)
 
+        # 4b. Domain Semantic Evidence Validation
+        # Verify that cited supporting observations semantically support the claimed fault and entity.
+        if proposal.decision == ProposalDecision.PROPOSE_DIAGNOSIS and proposal.suspected_root_cause:
+            fault_code = proposal.suspected_root_cause.split(":", 1)[0].strip()
+            affected_entities = set(proposal.affected_entities)
+            supporting_obs_ids = set(cited_obs_ids)
+            for f in cited_findings:
+                supporting_obs_ids.update(f.evidence_refs)
+            supporting_obs = [obs_map[oid] for oid in supporting_obs_ids if oid in obs_map]
+
+            if not supporting_obs:
+                err = f"Claimed root cause '{fault_code}' has no resolvable supporting observations in repository."
+                errors.append(err)
+                checks.append(GateCheckResult(check_name="claim_evidence_semantic_consistency", passed=False, message=err))
+            else:
+                entity_matching_obs = []
+                for o in supporting_obs:
+                    o_ent = o.entity_id
+                    if any(o_ent == ent or o_ent.startswith(f"{ent}:") or ent.startswith(f"{o_ent}:") for ent in affected_entities):
+                        entity_matching_obs.append(o)
+
+                if not entity_matching_obs and affected_entities:
+                    obs_ents = sorted(list(set(o.entity_id for o in supporting_obs)))
+                    err = (
+                        f"Semantic validation failed: None of the cited supporting observations ({obs_ents[:3]}) "
+                        f"correspond to claimed root-cause entity '{sorted(list(affected_entities))}'."
+                    )
+                    errors.append(err)
+                    checks.append(GateCheckResult(check_name="claim_evidence_semantic_consistency", passed=False, message=err))
+                else:
+                    eval_obs = entity_matching_obs if entity_matching_obs else supporting_obs
+                    semantic_error = self._validate_fault_semantics(fault_code, eval_obs, affected_entities)
+                    if semantic_error:
+                        errors.append(semantic_error)
+                        checks.append(GateCheckResult(
+                            check_name="claim_evidence_semantic_consistency",
+                            passed=False,
+                            message=semantic_error,
+                        ))
+                    else:
+                        checks.append(GateCheckResult(
+                            check_name="claim_evidence_semantic_consistency",
+                            passed=True,
+                            message=f"Semantic evidence validation passed: cited observations match '{fault_code}' domain requirements.",
+                        ))
+
         # 5. Check Contradiction Disclosure
         if competing_hypotheses:
             for alt in competing_hypotheses:
@@ -410,6 +480,32 @@ class EvidenceReleaseGate:
             limitations.append("Diagnosis based on a single evidence stream without independent cross-domain corroboration.")
             # Downgrade confidence category
             proposal.confidence_category = ConfidenceCategory.MODERATE
+
+        # Check temporal persistence & single snapshot
+        cited_metric_obs = [
+            obs for obs_id in cited_obs_ids
+            if (obs := obs_map.get(obs_id)) is not None and isinstance(obs, MetricObservation)
+        ]
+        unique_metric_timestamps = {o.timestamp for o in cited_metric_obs}
+        qualifying_samples_list = [
+            f.metadata.get("qualifying_samples") for f in cited_findings
+            if isinstance(f.metadata, dict) and isinstance(f.metadata.get("qualifying_samples"), int)
+        ]
+        is_single_snapshot = (
+            len(unique_metric_timestamps) <= 1
+            or (qualifying_samples_list and max(qualifying_samples_list, default=1) <= 1)
+        )
+        if is_single_snapshot and proposal.decision == ProposalDecision.PROPOSE_DIAGNOSIS:
+            single_snapshot_note = (
+                "Single-snapshot observation: Evidence was captured in a single polling interval without "
+                "demonstrated temporal persistence; verify ongoing state before taking intrusive remediation actions."
+            )
+            if single_snapshot_note not in limitations:
+                limitations.append(single_snapshot_note)
+            if proposal.confidence_category == ConfidenceCategory.HIGH:
+                warn = "Proposal claims HIGH confidence but evidence is from a single snapshot; downgraded to MODERATE."
+                warnings.append(warn)
+                proposal.confidence_category = ConfidenceCategory.MODERATE
 
         # Conflicting values for the same metric, entity, and timestamp weaken
         # support even when one tower's threshold rule can still identify a fault.
@@ -516,7 +612,8 @@ class EvidenceReleaseGate:
 
             certified_report = FinalReport(
                 incident_id=inc_id,
-                status="diagnosed",
+                status=ReportStatus("diagnosed"),
+                diagnostic_status="DIAGNOSIS",
                 suspected_root_cause=proposal.suspected_root_cause or "UNKNOWN",
                 confidence=num_conf,
                 affected_devices=list(dict.fromkeys(
@@ -554,3 +651,90 @@ class EvidenceReleaseGate:
             certified_final_report=certified_report,
             evaluated_at=datetime.now(timezone.utc),
         )
+
+    @staticmethod
+    def _validate_fault_semantics(
+        fault_code: str, observations: list[CanonicalObservation], entities: set[str]
+    ) -> str | None:
+        """Deterministically validate that cited observations semantically corroborate the claimed fault."""
+        metrics: dict[str, list[float]] = {}
+        for obs in observations:
+            if isinstance(obs, MetricObservation):
+                metrics.setdefault(obs.metric_name, []).append(obs.value)
+
+        log_messages = [
+            obs.message for obs in observations if isinstance(obs, LogObservation)
+        ]
+
+        if fault_code == "LINK_CONGESTION":
+            has_util = any(val >= 75.0 for val in metrics.get("link_utilization_pct", []))
+            has_drops = any(val > 0 for val in metrics.get("queue_drops", []))
+            has_loss = any(val > 0 for val in metrics.get("packet_loss_pct", []))
+            has_lat = any(val >= 100.0 for val in metrics.get("latency_ms", []))
+            if not (has_util or has_drops or has_loss or has_lat):
+                return (
+                    f"Congestion claim on '{sorted(list(entities))}' lacks supporting link utilization "
+                    f"(>= 75%) or buffer pressure (queue drops, packet loss) in cited observations."
+                )
+
+        elif fault_code == "DEVICE_OVERLOAD":
+            has_cpu = any(val >= 75.0 for val in metrics.get("cpu_utilization_pct", []))
+            has_mem = any(val >= 75.0 for val in metrics.get("memory_utilization_pct", []))
+            if not (has_cpu or has_mem):
+                return (
+                    f"Device overload claim on '{sorted(list(entities))}' lacks supporting CPU or "
+                    f"memory saturation measurements (>= 75%) in cited observations."
+                )
+
+        elif fault_code == "WEAK_WIFI":
+            has_rssi = any(val <= -65.0 for val in metrics.get("rssi_dbm", []))
+            has_snr = any(val <= 25.0 for val in metrics.get("snr_db", []))
+            if not (has_rssi or has_snr):
+                return (
+                    f"Weak Wi-Fi claim on '{sorted(list(entities))}' lacks supporting RF signal "
+                    f"measurements (RSSI <= -65dBm or SNR <= 25dB) in cited observations."
+                )
+
+        elif fault_code == "INTERFACE_FAULT":
+            has_errs = any(val > 0 for val in metrics.get("interface_errors", []))
+            has_crc = any(val > 0 for val in metrics.get("crc_errors", []))
+            has_flaps = any(val > 0 for val in metrics.get("link_flaps", []))
+            has_input_errs = any(val > 0 for val in metrics.get("input_errors", []))
+            has_err_log = any(
+                any(kw in msg.upper() for kw in ("ERROR", "CRC", "FLAP", "DOWN", "RESET"))
+                for msg in log_messages
+            )
+            if not (has_errs or has_crc or has_flaps or has_input_errs or has_err_log):
+                return (
+                    f"Interface fault claim on '{sorted(list(entities))}' lacks supporting interface error counters "
+                    f"or error logs in cited observations."
+                )
+
+        elif fault_code == "DNS_FAILURE":
+            has_lat = any(val >= 100.0 for val in metrics.get("latency_ms", []))
+            has_dns_lat = any(val >= 100.0 for val in metrics.get("dns_latency_ms", []))
+            has_log = any(
+                any(kw in msg.upper() for kw in ("SERVFAIL", "TIMEOUT", "REFUSED", "NXDOMAIN"))
+                for msg in log_messages
+            )
+            if not (has_lat or has_dns_lat or has_log):
+                return (
+                    f"DNS failure claim on '{sorted(list(entities))}' lacks supporting DNS resolution latency "
+                    f"or error logs in cited observations."
+                )
+
+        elif fault_code == "DHCP_FAILURE":
+            has_pool = any(val >= 90.0 for val in metrics.get("dhcp_pool_utilization_pct", []))
+            has_lat = any(val >= 500.0 for val in metrics.get("latency_ms", []))
+            has_loss = any(val >= 10.0 for val in metrics.get("packet_loss_pct", []))
+            has_log = any(
+                any(kw in msg.upper() for kw in ("EXHAUST", "NAK", "DEPLETED", "FULL", "DHCP", "TIMEOUT", "FAIL"))
+                for msg in log_messages
+            )
+            if not (has_pool or has_lat or has_loss or has_log):
+                return (
+                    f"DHCP failure claim on '{sorted(list(entities))}' lacks supporting DHCP service metrics "
+                    f"(latency, packet loss, pool utilization) or DHCP error logs in cited observations."
+                )
+
+        return None

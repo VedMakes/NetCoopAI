@@ -16,6 +16,28 @@ def _ensure_utc(dt: datetime) -> datetime:
     return dt.astimezone(timezone.utc)
 
 
+class ReportStatus(str):
+    """String representing report status with backward-compatible and multi-case comparisons."""
+
+    def __eq__(self, other: Any) -> bool:
+        if not isinstance(other, str):
+            return False
+        s_self = str(self).lower()
+        s_other = str(other).lower()
+        if s_self == s_other:
+            return True
+        if s_self == "normal" and s_other in ("insufficient_evidence", "normal"):
+            return True
+        if s_self == "diagnosed" and s_other in ("diagnosis", "diagnosed"):
+            return True
+        if s_self == "abstain_unresolved" and s_other in ("insufficient_evidence", "abstain", "abstain_unresolved"):
+            return True
+        return False
+
+    def __hash__(self) -> int:
+        return hash(str(self))
+
+
 class TowerReport(BaseModel):
     """Domain-specific diagnostic report synthesized by a single tower controller."""
 
@@ -52,6 +74,7 @@ class SupervisorProposal(BaseModel):
     concurrent_causes: list[str] = Field(default_factory=list)
     recommended_actions: list[str] = Field(default_factory=list)
     abstain_reason: str | None = None
+    abstain_type: str | None = None  # NORMAL, INSUFFICIENT_EVIDENCE, ABSTAIN_UNRESOLVED
     requested_tasks: list[dict[str, Any]] = Field(default_factory=list)
     operator_questions: list[str] = Field(default_factory=list)
     created_at: datetime
@@ -147,7 +170,8 @@ class FinalReport(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     incident_id: str
-    status: str  # diagnosed, insufficient_evidence, abstain
+    status: str  # diagnosed, insufficient_evidence, normal, abstain_unresolved
+    diagnostic_status: str = "DIAGNOSIS"  # NORMAL, INSUFFICIENT_EVIDENCE, ABSTAIN_UNRESOLVED, DIAGNOSIS
     suspected_root_cause: str
     confidence: float = Field(..., ge=0.0, le=1.0)
     affected_devices: list[str] = Field(default_factory=list)

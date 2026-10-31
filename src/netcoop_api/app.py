@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import AsyncGenerator
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
+from fastapi.staticfiles import StaticFiles
 
 from netcoop_api.events import event_sink
 from netcoop_api.routes import assistant, health, runs, scenarios
@@ -51,10 +54,6 @@ def create_app() -> FastAPI:
     app.include_router(assistant.router)
 
     # Mount compiled web frontend if available
-    from pathlib import Path
-    from fastapi.responses import RedirectResponse
-    from fastapi.staticfiles import StaticFiles
-
     web_dist = Path(__file__).resolve().parents[2] / "web" / "dist"
     if web_dist.is_dir():
         app.mount("/ui", StaticFiles(directory=str(web_dist), html=True), name="ui")

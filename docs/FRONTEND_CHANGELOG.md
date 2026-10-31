@@ -4,6 +4,61 @@ New entries are appended at the top.
 
 ---
 
+## [Phase 8] - Diagnostic Reliability & Evidence Release Gate Hardening
+- **Date:** 2026-11-01
+- **Phase:** PHASE 8 (Diagnostic Reliability & Gate Semantic Verification)
+- **Owner:** Senior Engineering Partner
+- **Starting commit:** `59f0067`
+- **Summary:**
+  - Resolved all audit-identified diagnostic weaknesses while strictly preserving the deterministic multi-agent architecture and contract compatibility:
+    1. **Four-Way Abstention Semantics:**
+       - Formally separated diagnostic statuses into `NORMAL`, `INSUFFICIENT_EVIDENCE`, `ABSTAIN_UNRESOLVED`, and `DIAGNOSIS`.
+       - Updated Performance Tower and Supervisor to explicitly recognize elevated link utilization without queue pressure or loss as `INSUFFICIENT_EVIDENCE` rather than false certainty.
+       - Preserved backwards compatibility with challenge brief contract (`FinalReport.status` in `("diagnosed", "insufficient_evidence", "abstain")`).
+    2. **Multi-Factor Supervisor Conflict Arbitration:**
+       - Replaced blind causal priority dominance with multi-factor evidence-driven arbitration: finding severity weights, temporal persistence (sample count), cross-tower corroboration, and review multipliers.
+       - Causal priorities now serve strictly as a secondary tie-breaker (25% weight).
+       - Added dynamic preservation of independent concurrent faults on disjoint entities when both meet evidence thresholds.
+       - Added explicit abstention when competing hypotheses lack sufficient corroborating signals.
+    3. **Domain-Specific Evidence Release Gate Semantic Verification:**
+       - Added `claim_evidence_semantic_consistency` gate check to validate that cited telemetry observations actually match claimed fault conditions (e.g., rejecting interface fault claims supported solely by unrelated CPU metrics).
+       - Enforces entity identity and metric relevance across all fault classes.
+    4. **Single-Snapshot Telemetry Confidence Calibration:**
+       - Added explicit temporal sample counting to detect single-snapshot captures.
+       - Automatically appends limitation notes to `GateOutcome` and caps confidence at `MODERATE` for unverified single-snapshot observations.
+    5. **Automated Audit Runner:**
+       - Upgraded `audit_artifacts/run_audit_tests.py` with programmatic assertions and system exit codes (0 for pass, 1 for fail).
+       - Added genuine anonymous directory isolation via `tempfile.TemporaryDirectory()` for scenario identity independence verification.
+    6. **Comprehensive Test Suite:**
+       - Created `tests/unit/test_diagnostic_reliability.py` with 9 end-to-end tests covering all four abstention states, conflict arbitration, concurrent fault preservation, semantic gate rejection, single-snapshot calibration, and blinded directory execution.
+- **Files created/modified:**
+  - Created `tests/unit/test_diagnostic_reliability.py`
+  - Created `audit_artifacts/run_audit_tests.py`
+  - Created `audit_artifacts/audit_test_results.json`
+  - Modified `src/netcoop/models/reports.py`
+  - Modified `src/netcoop/towers/performance.py`
+  - Modified `src/netcoop/supervisor/agent.py`
+  - Modified `src/netcoop/supervisor/gate.py`
+  - Modified `src/netcoop/supervisor/runtime.py`
+  - Modified `src/netcoop_api/app.py`
+  - Modified `docs/HARDCODING_AUDIT_REPORT.md`
+  - Modified `docs/FRONTEND_CHANGELOG.md`
+- **API/schema changes:**
+  - Added `diagnostic_status: str` and `abstain_type: str | None` to `SupervisorProposal` and `FinalReport`.
+  - Added `claim_evidence_semantic_consistency` check to `GateOutcome`.
+- **Dependencies added:** None.
+- **Tests run and actual results:**
+  - `uv run pytest -q`: **238 passed** (229 existing + 9 new reliability tests, 100% pass rate).
+  - `uv run ruff check .`: Clean, 0 errors.
+  - `uv run python audit_artifacts/run_audit_tests.py`: 100% PASSED (Tests A through F).
+  - `npm run build`: Built production bundle in 1.52s with 0 errors.
+- **CLI regression results:**
+  - `uv run netcoop doctor`: PASS.
+  - `uv run netcoop demo`: PASS.
+- **Known issues:** None.
+
+---
+
 ## [Phase 7] - Judge Demonstration Walkthrough & Script
 - **Date:** 2026-11-01
 - **Phase:** PHASE 7

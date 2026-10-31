@@ -35,7 +35,58 @@ class DeterministicRCAProvider:
 
         # If no active hypotheses and findings are empty or purely info
         severe_findings = [f for f in findings if f.severity.value in {"high", "critical", "medium"}]
+        unconfirmed_findings = [
+            f for f in findings
+            if f.metadata.get("has_missing_pressure")
+            or f.metadata.get("disposition") == "insufficient_evidence"
+            or (f.finding_type == "congestion_candidate" and f.metadata.get("peak_utilization_pct", 0) >= 85.0 and f.severity.value == "low")
+        ]
         if not hypotheses and not severe_findings:
+            if unconfirmed_findings:
+                uf = unconfirmed_findings[0]
+                ent = uf.entity_refs[0] if uf.entity_refs else "affected segment"
+                missing = uf.metadata.get("missing_signals", ["queue_drops", "packet_loss_pct"])
+                max_u = uf.metadata.get("peak_utilization_pct", "elevated")
+                if uf.metadata.get("has_missing_pressure"):
+                    reason = (
+                        f"Insufficient evidence: elevated utilization on {ent} ({max_u}%) requires "
+                        f"corroborating buffer pressure ({', '.join(missing)}) which is missing or unavailable."
+                    )
+                    claim = f"Diagnostic abstention: insufficient evidence on {ent} due to missing pressure metrics."
+                else:
+                    reason = (
+                        f"Insufficient evidence: elevated utilization on {ent} ({max_u}%) contradicts "
+                        f"explicit zero queue drops and normal latency."
+                    )
+                    claim = f"Diagnostic abstention: conflicting telemetry on {ent} without buffer pressure."
+
+                proposal = SupervisorProposal(
+                    proposal_id=generate_id("PROP"),
+                    incident_id=dossier.incident_id,
+                    decision=ProposalDecision.ABSTAIN,
+                    suspected_root_cause=None,
+                    affected_entities=uf.entity_refs,
+                    supporting_finding_refs=[uf.finding_id],
+                    confidence_category=ConfidenceCategory.INSUFFICIENT,
+                    alternative_causes=[],
+                    recommended_actions=[f"Deploy packet loss and queue drop probes on {ent}."],
+                    abstain_reason=reason,
+                    abstain_type="INSUFFICIENT_EVIDENCE",
+                    requested_tasks=[],
+                    created_at=datetime.now(timezone.utc),
+                )
+                manifest = ClaimEvidenceManifest(
+                    incident_id=dossier.incident_id,
+                    claim=claim,
+                    claimed_entities=uf.entity_refs,
+                    finding_ids=[uf.finding_id],
+                    observation_ids=uf.evidence_refs,
+                    independence_groups=[uf.independence_group or "telemetry"],
+                    contradiction_ids=[],
+                    contradiction_disclosures=[],
+                )
+                return proposal, manifest
+
             proposal = SupervisorProposal(
                 proposal_id=generate_id("PROP"),
                 incident_id=dossier.incident_id,
@@ -47,6 +98,7 @@ class DeterministicRCAProvider:
                 alternative_causes=[],
                 recommended_actions=["Continue continuous telemetry monitoring."],
                 abstain_reason="Normal telemetry: no significant anomalies, service failures, or degraded states identified across any domain.",
+                abstain_type="NORMAL",
                 requested_tasks=[],
                 created_at=datetime.now(timezone.utc),
             )
@@ -347,10 +399,38 @@ class DeterministicRCAProvider:
                 )
 
         def score_hyp(h: Hypothesis) -> float:
-            base_prio = priority_map.get(h.fault_code, 40)
+            h_findings = [f for f in findings if f.finding_id in h.supporting_finding_refs]
+            if not h_findings:
+                h_findings = [f for f in findings if any(ent in f.entity_refs for ent in h.suspected_entities)]
+
+            sev_weights = {"critical": 1.0, "high": 0.85, "medium": 0.60, "low": 0.30, "info": 0.10}
+            max_sev = max((sev_weights.get(f.severity.value, 0.30) for f in h_findings), default=0.30)
+            finding_count_weight = min(len(h_findings), 3) / 3.0
+            evidence_strength = (h.confidence_score * 0.50) + (max_sev * 0.35) + (finding_count_weight * 0.15)
+
+            qualifying_samples = max(
+                (f.metadata.get("qualifying_samples", 1) for f in h_findings if isinstance(f.metadata, dict)),
+                default=1,
+            )
+            if qualifying_samples >= 3:
+                temporal_score = 1.0
+            elif qualifying_samples == 2:
+                temporal_score = 0.80
+            else:
+                temporal_score = 0.50
+
+            corroborating_towers = len({f.source_tower for f in h_findings})
+            corroboration_score = min(corroborating_towers, 2) / 2.0
+
             review_status = reviews.get(h.fault_code, {}).get("status")
-            multiplier = {"supported": 1.0, "weakened": 0.2, "inconclusive": 0.75}.get(review_status, 1.0)
-            return base_prio * (0.5 + h.confidence_score) * multiplier
+            review_mult = {"supported": 1.15, "weakened": 0.20, "inconclusive": 0.60}.get(review_status, 1.0)
+
+            base_prio = priority_map.get(h.fault_code, 40)
+            priority_tiebreaker = (base_prio / 100.0) * 0.25
+
+            base_evidence = (evidence_strength * 0.55) + (temporal_score * 0.30) + (corroboration_score * 0.15)
+            total_score = (base_evidence * review_mult) * 0.75 + priority_tiebreaker
+            return total_score
 
         ranked_hypotheses = sorted(hypotheses, key=score_hyp, reverse=True)
         concurrent_causes: list[str] = []
@@ -365,6 +445,14 @@ class DeterministicRCAProvider:
                 conf_cat = ConfidenceCategory.MODERATE
             else:
                 return self._abstain_unresolved(dossier, "No conclusive faults or hypotheses identified.")
+        elif (
+            score_hyp(ranked_hypotheses[0]) < 0.32
+            or all(h.confidence_category == ConfidenceCategory.INSUFFICIENT for h in ranked_hypotheses)
+        ):
+            return self._abstain_unresolved(
+                dossier,
+                "Neither competing hypothesis has sufficient evidence to establish a conclusive diagnosis.",
+            )
         else:
             primary_hyp = ranked_hypotheses[0]
             coexisting_hypotheses = []
@@ -379,7 +467,8 @@ class DeterministicRCAProvider:
                     for conflict in conflicts
                 )
                 if disjoint and not is_classified_conflict and candidate.fault_code not in explicitly_competing:
-                    coexisting_hypotheses.append(candidate)
+                    if score_hyp(candidate) >= 0.45:
+                        coexisting_hypotheses.append(candidate)
 
             root_cause = f"{primary_hyp.fault_code}: {primary_hyp.rationale}"
             supported_hypotheses = [primary_hyp, *coexisting_hypotheses]
@@ -559,6 +648,7 @@ class DeterministicRCAProvider:
             alternative_causes=list(dict.fromkeys(hypothesis.fault_code for hypothesis in dossier.hypotheses)),
             recommended_actions=["Perform manual triage and verify cross-domain telemetry sources."],
             abstain_reason=reason,
+            abstain_type="ABSTAIN_UNRESOLVED",
             requested_tasks=[],
             operator_questions=self._operator_questions(dossier),
             created_at=datetime.now(timezone.utc),
