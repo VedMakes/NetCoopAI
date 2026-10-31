@@ -203,6 +203,42 @@ def test_evidence_gate_rejects_superseded_or_retracted_findings(memory_repo: SQL
     assert any("SUPERSEDED" in err for err in result.errors)
 
 
+@pytest.mark.parametrize(
+    "alternative_causes, expected_pass",
+    [(["DEVICE_OVERLOAD"], True), ([], False)],
+)
+def test_gate_checks_competing_hypothesis_disclosure_by_fault_code(
+    alternative_causes: list[str], expected_pass: bool
+):
+    proposal = SupervisorProposal(
+        proposal_id="PROP-CONFLICT-CODE",
+        incident_id="INC-CONFLICT-CODE",
+        decision=ProposalDecision.PROPOSE_DIAGNOSIS,
+        suspected_root_cause="LINK_CONGESTION: link pressure",
+        affected_entities=["SW-1:eth0"],
+        supporting_finding_refs=[],
+        confidence_category=ConfidenceCategory.LOW,
+        alternative_causes=alternative_causes,
+        recommended_actions=[],
+        created_at=datetime.now(timezone.utc),
+    )
+    result = EvidenceReleaseGate().evaluate(
+        proposal,
+        incident_id=proposal.incident_id,
+        known_observations=[],
+        known_findings=[],
+        competing_hypotheses=["LINK_CONGESTION: ['SW-1:eth0']", "DEVICE_OVERLOAD: ['SW-1']"],
+    )
+    check = next(
+        item for item in result.checks
+        if item.check_name == "contradiction_disclosure" and "DEVICE_OVERLOAD" in item.message
+    )
+    assert check.passed is expected_pass
+    if not expected_pass:
+        assert check.severity == "error"
+        assert any(issue.code == "unresolved_hypothesis" for issue in result.issues)
+
+
 def test_evidence_gate_rejects_wrong_incident_evidence(memory_repo: SQLiteRepository):
     """Verifies that evidence belonging to a different incident cannot be cited."""
     gate = EvidenceReleaseGate(repository=memory_repo)

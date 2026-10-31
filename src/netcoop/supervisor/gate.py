@@ -362,18 +362,30 @@ class EvidenceReleaseGate:
         if competing_hypotheses:
             for alt in competing_hypotheses:
                 # Disclosed if in proposal alternative_causes or in manifest contradiction disclosures
-                disclosed = alt in proposal.alternative_causes or alt in proposal.concurrent_causes
-                primary_code = (proposal.suspected_root_cause or "").split(":", 1)[0]
+                alt_code = alt.split(":", 1)[0].strip()
+                disclosed_codes = {
+                    candidate.split(":", 1)[0].strip()
+                    for candidate in proposal.alternative_causes + proposal.concurrent_causes
+                }
+                disclosed = (
+                    alt in proposal.alternative_causes
+                    or alt in proposal.concurrent_causes
+                    or alt_code in disclosed_codes
+                )
+                primary_code = (proposal.suspected_root_cause or "").split(":", 1)[0].strip()
                 if primary_code and alt.startswith(f"{primary_code}: "):
                     disclosed = True
-                if manifest and (alt in manifest.contradiction_ids or any(alt in d for d in manifest.contradiction_disclosures)):
+                if manifest and (
+                    alt in manifest.contradiction_ids
+                    or alt_code in {item.split(":", 1)[0].strip() for item in manifest.contradiction_ids}
+                    or any(alt in disclosure or alt_code in disclosure for disclosure in manifest.contradiction_disclosures)
+                ):
                     disclosed = True
 
                 if not disclosed:
-                    warn = f"Unresolved competing hypothesis '{alt}' was not disclosed in alternative_causes or manifest."
-                    warnings.append(warn)
-                    limitations.append(f"Competing hypothesis '{alt}' was identified across towers but not explicitly dispositioned.")
-                    checks.append(GateCheckResult(check_name="contradiction_disclosure", passed=False, message=warn, severity="warning"))
+                    err = f"Unresolved competing hypothesis '{alt}' was not disclosed in alternative_causes or manifest."
+                    errors.append(err)
+                    checks.append(GateCheckResult(check_name="contradiction_disclosure", passed=False, message=err))
                 else:
                     checks.append(GateCheckResult(check_name="contradiction_disclosure", passed=True, message=f"Disclosed competing hypothesis: {alt}"))
 

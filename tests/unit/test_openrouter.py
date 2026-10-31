@@ -105,11 +105,189 @@ def test_openrouter_build_prompt_payload(sample_dossier: IncidentDossier):
     sys_prompt = payload["messages"][0]["content"]
     assert "F-PERF-01" in sys_prompt
     assert "OBS-M-01" in sys_prompt
-    assert "NEVER invent or fabricate" in sys_prompt
+    assert "deterministic controller is authoritative" in sys_prompt
+    assert "read-only follow-up" in sys_prompt.lower()
 
     user_prompt = payload["messages"][1]["content"]
     assert "INC-OR-01" in user_prompt
     assert "SW_CORE_01:Gi0/1" in user_prompt
+    assert "controller_decision" in user_prompt
+
+
+def test_openrouter_skips_model_when_controller_requests_evidence(sample_dossier: IncidentDossier, monkeypatch):
+    competing = Hypothesis(
+        hypothesis_id="HYP-INFRA-02",
+        incident_id=sample_dossier.incident_id,
+        fault_code="DEVICE_OVERLOAD",
+        suspected_entities=["SW_CORE_01"],
+        supporting_finding_refs=[],
+        contradicting_finding_refs=[],
+        confidence_score=0.7,
+        confidence_category=ConfidenceCategory.MODERATE,
+        rationale="Device resource pressure",
+        status="active",
+        created_at=datetime.now(timezone.utc),
+    )
+    sample_dossier.hypotheses.append(competing)
+    provider = OpenRouterProvider(api_key="test-key")
+    monkeypatch.setattr(provider, "_call_openrouter", lambda payload: pytest.fail("unexpected model call"))
+
+    proposal, _ = provider.diagnose(sample_dossier)
+
+    assert proposal.decision == ProposalDecision.REQUEST_EVIDENCE
+    assert proposal.requested_tasks
+
+
+def test_openrouter_cannot_reverse_abstention_after_inconclusive_reviews(
+    sample_dossier: IncidentDossier, monkeypatch
+):
+    competing = Hypothesis(
+        hypothesis_id="HYP-INFRA-02",
+        incident_id=sample_dossier.incident_id,
+        fault_code="DEVICE_OVERLOAD",
+        suspected_entities=["SW_CORE_01"],
+        supporting_finding_refs=[],
+        contradicting_finding_refs=[],
+        confidence_score=0.7,
+        confidence_category=ConfidenceCategory.MODERATE,
+        rationale="Device resource pressure",
+        status="active",
+        created_at=datetime.now(timezone.utc),
+    )
+    sample_dossier.hypotheses.append(competing)
+    sample_dossier.investigation_round = 2
+    sample_dossier.task_history = [{
+        "hypothesis_reviews": [
+            {"fault_code": "LINK_CONGESTION", "status": "inconclusive"},
+            {"fault_code": "DEVICE_OVERLOAD", "status": "inconclusive"},
+        ]
+    }]
+    provider = OpenRouterProvider(api_key="test-key")
+    monkeypatch.setattr(provider, "_call_openrouter", lambda payload: pytest.fail("unexpected model call"))
+
+    proposal, _ = provider.diagnose(sample_dossier)
+
+    assert proposal.decision == ProposalDecision.ABSTAIN
+    assert proposal.confidence_category == ConfidenceCategory.INSUFFICIENT
+
+
+def test_openrouter_preserves_controller_diagnosis_and_evidence(sample_dossier: IncidentDossier, monkeypatch):
+    controller, controller_manifest = DeterministicRCAProvider().diagnose(sample_dossier)
+    response = {
+        "decision": "propose_diagnosis",
+        "suspected_root_cause": "LINK_CONGESTION: changed model explanation",
+        "affected_entities": ["UNOBSERVED_DEVICE"],
+        "supporting_finding_refs": ["F-PERF-01"],
+        "confidence_category": "high",
+        "alternative_causes": ["DEVICE_OVERLOAD"],
+        "concurrent_causes": ["DNS_FAILURE"],
+        "recommended_actions": ["Inspect SW_CORE_01:Gi0/1 queue counters"],
+        "abstain_reason": None,
+        "requested_tasks": [],
+        "claim": "Model supplied claim",
+        "observation_ids": ["OBS-M-01"],
+        "contradiction_ids": [],
+        "contradiction_disclosures": [],
+    }
+    provider = OpenRouterProvider(api_key="test-key")
+    monkeypatch.setattr(provider, "_call_openrouter", lambda payload: json.dumps(response))
+
+    proposal, manifest = provider.diagnose(sample_dossier)
+
+    assert proposal.decision == controller.decision
+    assert proposal.suspected_root_cause == controller.suspected_root_cause
+    assert proposal.affected_entities == controller.affected_entities
+    assert proposal.supporting_finding_refs == controller.supporting_finding_refs
+    assert proposal.confidence_category == controller.confidence_category
+    assert proposal.alternative_causes == controller.alternative_causes
+    assert proposal.concurrent_causes == controller.concurrent_causes
+    assert manifest == controller_manifest
+    assert proposal.recommended_actions == response["recommended_actions"]
+
+
+def test_openrouter_serializes_timestamps_in_task_history(sample_dossier: IncidentDossier):
+    sample_dossier.task_history = [{"task_id": "TASK-1", "completed_at": datetime.now(timezone.utc)}]
+    payload = OpenRouterProvider(api_key="test-key")._build_prompt_payload(sample_dossier)
+    user_data = json.loads(payload["messages"][1]["content"])
+    assert user_data["task_history"][0]["completed_at"].endswith("+00:00")
+
+
+def test_openrouter_falls_back_for_finding_id_used_as_fault_code(sample_dossier: IncidentDossier, monkeypatch):
+    response = {
+        "decision": "propose_diagnosis",
+        "suspected_root_cause": "F-PERF-01: Link congestion",
+        "affected_entities": ["SW_CORE_01:Gi0/1"],
+        "supporting_finding_refs": ["F-PERF-01"],
+        "confidence_category": "high",
+        "alternative_causes": [],
+        "concurrent_causes": [],
+        "recommended_actions": ["Inspect SW_CORE_01:Gi0/1 queue counters"],
+        "abstain_reason": None,
+        "requested_tasks": [],
+        "claim": "claim",
+        "observation_ids": ["OBS-M-01"],
+        "contradiction_ids": [],
+        "contradiction_disclosures": [],
+    }
+    provider = OpenRouterProvider(api_key="test-key")
+    monkeypatch.setattr(provider, "_call_openrouter", lambda payload: json.dumps(response))
+
+    proposal, _ = provider.diagnose(sample_dossier)
+
+    assert proposal.suspected_root_cause.startswith("LINK_CONGESTION:")
+
+
+def test_openrouter_discards_mutating_or_unknown_entity_recommendations(sample_dossier: IncidentDossier, monkeypatch):
+    controller, _ = DeterministicRCAProvider().diagnose(sample_dossier)
+    response = {
+        "decision": "propose_diagnosis",
+        "suspected_root_cause": controller.suspected_root_cause,
+        "affected_entities": controller.affected_entities,
+        "supporting_finding_refs": controller.supporting_finding_refs,
+        "confidence_category": controller.confidence_category.value,
+        "alternative_causes": controller.alternative_causes,
+        "concurrent_causes": controller.concurrent_causes,
+        "recommended_actions": ["Restart UNOBSERVED_DEVICE to clear the fault"],
+        "abstain_reason": None,
+        "requested_tasks": [],
+        "claim": "claim",
+        "observation_ids": ["OBS-M-01"],
+        "contradiction_ids": [],
+        "contradiction_disclosures": [],
+    }
+    provider = OpenRouterProvider(api_key="test-key")
+    monkeypatch.setattr(provider, "_call_openrouter", lambda payload: json.dumps(response))
+
+    proposal, _ = provider.diagnose(sample_dossier)
+
+    assert proposal.recommended_actions == controller.recommended_actions
+
+
+def test_openrouter_cannot_change_controller_decision_to_abstain(sample_dossier: IncidentDossier, monkeypatch):
+    controller, _ = DeterministicRCAProvider().diagnose(sample_dossier)
+    response = {
+        "decision": "abstain",
+        "suspected_root_cause": None,
+        "affected_entities": [],
+        "supporting_finding_refs": [],
+        "confidence_category": "insufficient",
+        "alternative_causes": [],
+        "concurrent_causes": [],
+        "recommended_actions": ["Inspect SW_CORE_01:Gi0/1 queue counters"],
+        "abstain_reason": "Model opinion",
+        "requested_tasks": [],
+        "claim": "claim",
+        "observation_ids": [],
+        "contradiction_ids": [],
+        "contradiction_disclosures": [],
+    }
+    provider = OpenRouterProvider(api_key="test-key")
+    monkeypatch.setattr(provider, "_call_openrouter", lambda payload: json.dumps(response))
+
+    proposal, _ = provider.diagnose(sample_dossier)
+
+    assert proposal.decision == controller.decision
+    assert proposal.suspected_root_cause == controller.suspected_root_cause
 
 
 def test_openrouter_response_parsing_valid(sample_dossier: IncidentDossier, monkeypatch):

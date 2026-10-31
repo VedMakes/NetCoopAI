@@ -2,7 +2,7 @@
 
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Tests: 193 passed](https://img.shields.io/badge/tests-193%20passed-brightgreen.svg)]()
+[![Tests: 214 passed](https://img.shields.io/badge/tests-214%20passed-brightgreen.svg)]()
 [![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
 
 **NetCoop AI** is an autonomous multi-agent cooperative network diagnostic platform engineered to triage, correlate, and determine root causes for campus and enterprise network incidents.
@@ -32,6 +32,7 @@ Unlike a monolithic diagnostic engine, NetCoop AI uses four specialist towers co
 - **100% Offline Determinism with Optional LLM Mode**:
   - Deterministic diagnosis runs offline without API keys or network calls.
   - Optional `--llm auto` and `--llm on` modes can enrich reports when a supported provider is configured.
+  - The deterministic supervisor owns diagnosis, affected entities, confidence, and evidence references. The optional RCA model can refine only bounded read-only follow-up recommendations; it cannot override evidence requests or abstentions.
 - **Rich CLI & Reporting Experience**:
   - End-inspired amethyst/lavender terminal palette, rounded diagnosis panels, compact confidence bar, and quiet spinners/progress for longer interactive runs.
   - Animations stay off for redirected output and JSON/Markdown modes; set `NO_COLOR=1` to suppress interactive spinners.
@@ -229,7 +230,7 @@ The included generator is useful for deterministic regression checks, not a repr
 
 ### Impact reporting
 
-The JSON report keeps `affected_devices` as a compatibility union, and now separates `observed_symptom_entities` (entities with cited telemetry/log evidence) from `inferred_affected_entities` (topology-based impact candidates). Inferred entities are predictions, not confirmed user impact; runtime diagnosis does not know the ground-truth affected set. On the 21 generated cases, the union compared with the generator's `intended_affected_entities` has 84.6% micro precision, 73.3% recall, 78.6% F1, and exact set agreement in 12/21 cases. These figures measure agreement with the generator's intended impact annotations, not independently observed outcomes.
+The JSON report keeps `affected_devices` as a compatibility union, and now separates `observed_symptom_entities` (entities with cited telemetry/log evidence) from `inferred_affected_entities` (topology-based impact candidates). Inferred entities are predictions, not confirmed user impact; runtime diagnosis does not know the ground-truth affected set. In the latest 21 generated cases, the union compared with the generator's `intended_affected_entities` has 83.3% micro precision, 100% recall, 90.9% F1, and exact set agreement in 15/21 cases. These figures measure agreement with the generator's intended impact annotations, not independently observed outcomes.
 
 ---
 
@@ -238,6 +239,7 @@ The JSON report keeps `affected_devices` as a compatibility union, and now separ
 - [Local Input Formats](docs/INPUT_FORMATS.md)
 - [Network Profiles and Adaptation](docs/NETWORK_PROFILES.md)
 - [System Architecture](docs/ARCHITECTURE.md)
+- [Rubric Evidence and Evaluation Limits](docs/RUBRIC_EVIDENCE.md)
 - [3-5 Minute Demo Guide](docs/DEMO_SCRIPT.md)
 
 ---
