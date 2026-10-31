@@ -2,17 +2,17 @@
 
 > Update this file at every phase start, implementation handoff, review verdict and blocker. `docs/COLLAB_LOG.md` is the append-only history; this file is only the current-state summary.
 
-- **Current phase:** Phase 7
-- **Phase title:** CLI, reports and demo experience
-- **Status:** `AWAITING_REVIEW`
-- **Implementation owner:** Friend B
-- **Reviewer:** Friend A
+- **Current phase:** Phase 8
+- **Phase title:** Benchmarking, evaluation and hardening
+- **Status:** `IN_PROGRESS`
+- **Implementation owner:** Friend A
+- **Reviewer:** Friend B
 - **Shared branch:** `hackathon/team-integration`
-- **Last accepted phase:** Phase 6 (VERIFIED by Friend B)
-- **Latest implementation commit:** `48b4d8f`
-- **Latest review commit:** Review of Phase 6 completed
+- **Last accepted phase:** Phase 7 (VERIFIED by Friend A)
+- **Latest implementation commit:** None (Phase 8 in progress)
+- **Latest review commit:** Review of Phase 7 completed
 - **Blocking issues:** None recorded
-- **Next phase:** Phase 8, owned by Friend A
+- **Next phase:** Final project release
 
 ## Status meanings
 
@@ -26,13 +26,13 @@
 
 ## Current phase checklist
 
-- [x] Owner confirmed session designation (`TEAMMATE_ID = B`).
-- [x] Reviewer independently verified Phase 6 handoff.
+- [x] Owner confirmed session designation (`TEAMMATE_ID = A`).
+- [x] Reviewer independently verified Phase 7 handoff.
 - [x] Owner inspected repository, tools, and docs.
 - [x] Shared branch `hackathon/team-integration` active.
-- [x] Implementation completed.
-- [x] Required tests run and recorded.
-- [x] Owner appended implementation handoff to `COLLAB_LOG.md`.
+- [ ] Implementation completed.
+- [ ] Required tests run and recorded.
+- [ ] Owner appended implementation handoff to `COLLAB_LOG.md`.
 - [ ] Owner created commit on shared branch.
 - [ ] Reviewer pulled exact commit.
 - [ ] Reviewer independently ran checks.
@@ -50,5 +50,5 @@
 | 4 | Friend A | Friend B | VERIFIED |
 | 5 | Friend B | Friend A | VERIFIED |
 | 6 | Friend A | Friend B | VERIFIED |
-| 7 | Friend B | Friend A | AWAITING_REVIEW |
-| 8 | Friend A | Friend B | NOT_STARTED |
+| 7 | Friend B | Friend A | VERIFIED |
+| 8 | Friend A | Friend B | IN_PROGRESS |
