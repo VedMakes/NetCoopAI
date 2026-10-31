@@ -52,10 +52,18 @@ def create_app() -> FastAPI:
 
     # Mount compiled web frontend if available
     from pathlib import Path
+    from fastapi.responses import RedirectResponse
+    from fastapi.staticfiles import StaticFiles
+
     web_dist = Path(__file__).resolve().parents[2] / "web" / "dist"
     if web_dist.is_dir():
-        from fastapi.staticfiles import StaticFiles
         app.mount("/ui", StaticFiles(directory=str(web_dist), html=True), name="ui")
+        if (web_dist / "assets").is_dir():
+            app.mount("/assets", StaticFiles(directory=str(web_dist / "assets")), name="assets")
+
+        @app.get("/ui")
+        def ui_redirect():
+            return RedirectResponse(url="/ui/")
 
     @app.get("/")
     def root():
