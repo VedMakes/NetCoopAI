@@ -135,3 +135,29 @@ NOT_A_DATE,SW_CORE_01,cpu_utilization_pct,55.0,percent
     assert batch.metric_count == 2
     assert len(batch.quarantined_records) == 1
     assert "Missing timestamp" in batch.quarantined_records[0]["error"] or "timestamp" in str(batch.quarantined_records[0]["error"]).lower()
+
+
+def test_unknown_units_are_quarantined_instead_of_silently_relabelled(tmp_path: Path):
+    file_path = tmp_path / "unknown_unit.csv"
+    file_path.write_text(
+        "timestamp,device_id,metric_name,value,unit\n"
+        "2026-10-31T12:00:00Z,SW_CORE_01,latency_ms,5,minutes\n",
+        encoding="utf-8",
+    )
+
+    batch = TelemetryLoader().load_file(file_path)
+
+    assert batch.metric_count == 0
+    assert any("Unrecognized unit 'minutes'" in warning.message for warning in batch.warnings)
+
+
+def test_unsupported_canonical_schema_version_is_explicitly_warned():
+    record = {
+        "observation_type": "metric", "observation_id": "OBS-V2", "incident_id": "INC-V2",
+        "source": "test", "entity_id": "SW_CORE_01", "timestamp": "2026-10-31T12:00:00Z",
+        "schema_version": "2.0", "metric_name": "latency_ms", "value": 10, "unit": "milliseconds",
+    }
+    batch = TelemetryLoader().load_json_data({"observations": [record]})
+
+    assert batch.metric_count == 1
+    assert any(w.warning_type == "schema_version_warning" for w in batch.warnings)

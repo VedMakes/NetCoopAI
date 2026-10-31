@@ -3,14 +3,19 @@
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 
 import pytest
 
 from netcoop.cli.main import _load_observations_from_target
+from netcoop.communication.fabric import IntegrationFabric
+from netcoop.configuration.profile import NetworkProfile
 from netcoop.models.observations import MetricObservation
 from netcoop.storage.sqlite import SQLiteRepository
 from netcoop.supervisor.runtime import SupervisorRuntime
+from netcoop.towers.rules import load_rules
+from reference.sample_generator import SCENARIO_PRESETS, generate_scenario
 
 SCENARIOS_DIR = Path("fixtures/scenarios")
 
@@ -137,3 +142,148 @@ def test_zero_leakage_of_ground_truth_into_runtime():
         content = py_file.read_text(encoding="utf-8")
         assert "ground_truth.json" not in content, f"Leaked ground truth reference in {py_file}"
         assert "evaluation/ground_truth" not in content, f"Leaked ground truth reference in {py_file}"
+
+
+def test_cli_ingestion_quarantine_is_preserved_in_final_report(tmp_path: Path):
+    source = SCENARIOS_DIR / "link_congestion"
+    telemetry = tmp_path / "telemetry.jsonl"
+    telemetry.write_text(
+        (source / "telemetry.jsonl").read_text(encoding="utf-8") + "{broken json line\n",
+        encoding="utf-8",
+    )
+    shutil.copyfile(source / "topology.json", tmp_path / "topology.json")
+
+    quality_warnings: list[str] = []
+    incident_id, observations = _load_observations_from_target(
+        tmp_path, data_quality_warnings=quality_warnings
+    )
+    report = SupervisorRuntime().run_incident(
+        incident_id, observations, data_quality_warnings=quality_warnings
+    )
+
+    assert report.status == "diagnosed"
+    assert len(report.data_quality_warnings) == 1
+    assert "quarantined record" in report.data_quality_warnings[0]
+
+
+@pytest.mark.parametrize("scenario_name", list(SCENARIO_PRESETS))
+@pytest.mark.parametrize("seed", [7, 42, 2026])
+def test_owned_generator_multi_seed_diagnostic_matrix(tmp_path: Path, scenario_name: str, seed: int):
+    """Score generated cases across seeds; ground truth is read only by this test."""
+    scenario = tmp_path / f"{scenario_name}-{seed}"
+    generate_scenario(scenario_name, scenario, seed=seed, num_steps=15)
+    incident_id, observations = _load_observations_from_target(scenario)
+    report = SupervisorRuntime().run_incident(incident_id, observations)
+    truth = json.loads((scenario / "evaluation" / "ground_truth.json").read_text(encoding="utf-8"))
+
+    expected = truth["injected_fault_class"].upper()
+    if expected == "HEALTHY":
+        assert report.status == "insufficient_evidence", (scenario_name, seed, report)
+    else:
+        assert report.status == "diagnosed", (scenario_name, seed, report)
+        assert expected.upper() in report.suspected_root_cause.upper(), (scenario_name, seed, report)
+        assert truth["target_entity"] in report.affected_devices, (scenario_name, seed, report.affected_devices)
+
+
+@pytest.mark.parametrize(
+    "scenario_name,expected_scope",
+    [
+        ("dns_failure", ["HOSTEL_ZONE_A", "SRV_DNS_01"]),
+        ("dhcp_failure", ["HOSTEL_ZONE_A", "SRV_DHCP_01"]),
+    ],
+)
+def test_service_diagnoses_record_real_services_to_connectivity_peer_query(scenario_name, expected_scope):
+    incident_id, observations = _load_observations_from_target(SCENARIOS_DIR / scenario_name)
+    report = SupervisorRuntime().run_incident(incident_id, observations)
+
+    assert report.status == "diagnosed"
+    assert len(report.peer_interactions) == 1
+    interaction = report.peer_interactions[0]
+    assert interaction["requester"] == "services"
+    assert interaction["recipient"] == "connectivity"
+    assert interaction["capability"] == "connectivity.trace_path"
+    assert interaction["scope"] == expected_scope
+    assert interaction["status"] == "completed"
+    assert interaction["result"]["reachable"] is True
+
+
+def test_compound_dns_and_dhcp_incident_queries_each_declared_service_dependency():
+    observations = []
+    for scenario_name in ("dns_failure", "dhcp_failure"):
+        _, case_observations = _load_observations_from_target(SCENARIOS_DIR / scenario_name)
+        observations.extend(
+            obs.model_copy(update={
+                "incident_id": "INC-DNS-DHCP-COMPOUND",
+                "observation_id": f"{scenario_name}:{obs.observation_id}",
+            })
+            for obs in case_observations
+        )
+
+    report = SupervisorRuntime().run_incident("INC-DNS-DHCP-COMPOUND", observations)
+
+    assert report.status == "diagnosed"
+    assert {tuple(item["scope"]) for item in report.peer_interactions} == {
+        ("HOSTEL_ZONE_A", "SRV_DNS_01"),
+        ("HOSTEL_ZONE_A", "SRV_DHCP_01"),
+    }
+    assert all(item["result"]["reachable"] is True for item in report.peer_interactions)
+
+
+def test_service_peer_query_reports_unknown_for_missing_path_in_unknown_topology(tmp_path: Path):
+    source = SCENARIOS_DIR / "dhcp_failure"
+    (tmp_path / "telemetry.jsonl").write_text(
+        (source / "telemetry.jsonl").read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    topology = json.loads((source / "topology.json").read_text(encoding="utf-8"))
+    topology["links"] = []
+    (tmp_path / "topology.json").write_text(json.dumps(topology), encoding="utf-8")
+    profile = NetworkProfile.model_validate({
+        "profile_id": "unknown-topology", "display_name": "Unknown completeness",
+        "topology_completeness": "unknown",
+    })
+    incident_id, observations = _load_observations_from_target(tmp_path, profile=profile)
+    report = SupervisorRuntime(
+        fabric=IntegrationFabric(rules=profile.apply_to_rules(load_rules())),
+        network_profile={"profile_id": profile.profile_id, "version": profile.version},
+    ).run_incident(incident_id, observations)
+
+    assert report.status == "diagnosed"
+    assert len(report.peer_interactions) == 1
+    assert report.peer_interactions[0]["result"]["reachable"] is None
+    assert "unknown" in report.peer_interactions[0]["result"]["warning"]
+
+
+def test_generated_compound_dns_and_congestion_preserves_both_causes(tmp_path: Path):
+    fault_cases = []
+    for name in ("dns_failure", "link_congestion"):
+        folder = tmp_path / name
+        generate_scenario(name, folder, seed=31, num_steps=15)
+        _, observations = _load_observations_from_target(folder)
+        fault_cases.extend(
+            obs.model_copy(update={
+                "incident_id": "INC-COMPOUND",
+                "observation_id": f"{name}:{obs.observation_id}",
+            })
+            for obs in observations
+        )
+
+    report = SupervisorRuntime().run_incident("INC-COMPOUND", fault_cases)
+
+    assert report.status == "diagnosed"
+    causes = [report.suspected_root_cause, *report.concurrent_causes]
+    assert any("DNS_FAILURE" in cause for cause in causes)
+    assert any("LINK_CONGESTION" in cause for cause in causes)
+
+
+def test_invalid_topology_is_reported_and_diagnosis_continues(tmp_path: Path):
+    source = SCENARIOS_DIR / "link_congestion"
+    (tmp_path / "telemetry.jsonl").write_text(
+        (source / "telemetry.jsonl").read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    (tmp_path / "topology.json").write_text('{"links": [broken', encoding="utf-8")
+    warnings: list[str] = []
+    incident_id, observations = _load_observations_from_target(tmp_path, data_quality_warnings=warnings)
+    report = SupervisorRuntime().run_incident(incident_id, observations, data_quality_warnings=warnings)
+
+    assert report.status == "diagnosed"
+    assert any("topology file ignored" in warning for warning in report.data_quality_warnings)

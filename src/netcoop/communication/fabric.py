@@ -11,7 +11,12 @@ from typing import TYPE_CHECKING, Any
 from netcoop.communication.events import EventBus, EventEnvelope
 from netcoop.communication.queries import PeerQuery, PeerQueryResult, QueryRouter
 from netcoop.communication.registry import CapabilityRegistry
-from netcoop.communication.tasks import InvestigationTask, TaskDispatcher, TaskResult
+from netcoop.communication.tasks import (
+    DIAGNOSTIC_TASK_ARTIFACT_SCHEMA,
+    InvestigationTask,
+    TaskDispatcher,
+    TaskResult,
+)
 from netcoop.models.enums import TowerId
 from netcoop.utils.id_generator import generate_id
 
@@ -223,6 +228,7 @@ class IntegrationFabric:
             constraints=constraints,
             deadline_at=deadline_at,
             parent_task_id=parent_task_id,
+            expected_result_schema=DIAGNOSTIC_TASK_ARTIFACT_SCHEMA,
             incident_id=incident_id,
         )
 

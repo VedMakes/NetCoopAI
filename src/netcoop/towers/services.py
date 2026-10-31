@@ -30,6 +30,7 @@ from netcoop.models.observations import (
 )
 from netcoop.models.reports import TowerReport
 from netcoop.storage.sqlite import SQLiteRepository
+from netcoop.towers.base import investigate_with_engine
 from netcoop.towers.rules import load_rules
 from netcoop.utils.id_generator import generate_id
 
@@ -80,20 +81,28 @@ class ServicesEngine:
         dns_obs: list[CanonicalObservation] = []
         has_severe_error = False
         max_dns_latency = 0.0
-        dns_target_entity = "SRV_DNS_01"
+        role_config = self.rules.get("entity_roles", {})
+        dns_entities = set(role_config.get("dns_resolver", []))
+        dns_target_entity = next(iter(sorted(dns_entities)), "SRV_DNS_01")
+        profile_roles_configured = bool(dns_entities)
 
         for obs in observations:
             # Check metrics on DNS servers or dns latency metrics
             if isinstance(obs, MetricObservation):
-                if "DNS" in obs.entity_id.upper() or obs.metric_name == "latency_ms":
-                    if "DNS" in obs.entity_id.upper() and obs.metric_name == "latency_ms":
-                        dns_obs.append(obs)
-                        dns_target_entity = obs.entity_id
-                        if obs.value > max_dns_latency:
-                            max_dns_latency = obs.value
+                is_dns_entity = obs.entity_id in dns_entities or (
+                    not profile_roles_configured and "DNS" in obs.entity_id.upper()
+                )
+                if is_dns_entity and obs.metric_name == "latency_ms":
+                    dns_obs.append(obs)
+                    dns_target_entity = obs.entity_id
+                    if obs.value > max_dns_latency:
+                        max_dns_latency = obs.value
             elif isinstance(obs, LogObservation):
                 msg_upper = obs.message.upper()
-                if "DNS" in obs.entity_id.upper() or any(k in msg_upper for k in dns_keywords):
+                is_dns_entity = obs.entity_id in dns_entities or (
+                    not profile_roles_configured and "DNS" in obs.entity_id.upper()
+                )
+                if is_dns_entity or any(k in msg_upper for k in dns_keywords):
                     if any(k in msg_upper for k in dns_keywords) or obs.log_level in ("ERROR", "CRITICAL"):
                         dns_obs.append(obs)
                         dns_target_entity = obs.entity_id
@@ -102,7 +111,11 @@ class ServicesEngine:
         if not dns_obs:
             return
 
-        evidence_ids = [o.observation_id for o in dns_obs]
+        evidence_ids = [
+            o.observation_id for o in dns_obs
+            if (isinstance(o, MetricObservation) and o.metric_name == "latency_ms" and o.value >= dns_lat_warn)
+            or (isinstance(o, LogObservation) and any(k in o.message.upper() for k in dns_keywords))
+        ]
 
         if has_severe_error or max_dns_latency >= dns_lat_crit:
             f_id = generate_id("F-SERV")
@@ -183,16 +196,25 @@ class ServicesEngine:
         ]
 
         dhcp_obs: list[CanonicalObservation] = []
-        target_entity = "SRV_DHCP_01"
+        role_config = self.rules.get("entity_roles", {})
+        dhcp_entities = set(role_config.get("dhcp_server", []))
+        target_entity = next(iter(sorted(dhcp_entities)), "SRV_DHCP_01")
+        profile_roles_configured = bool(dhcp_entities)
 
         for obs in observations:
             if isinstance(obs, LogObservation):
                 msg_upper = obs.message.upper()
-                if "DHCP" in obs.entity_id.upper() or any(k in msg_upper for k in dhcp_keywords):
+                is_dhcp_entity = obs.entity_id in dhcp_entities or (
+                    not profile_roles_configured and "DHCP" in obs.entity_id.upper()
+                )
+                if is_dhcp_entity or any(k in msg_upper for k in dhcp_keywords):
                     if any(k in msg_upper for k in dhcp_keywords) or obs.log_level in ("ERROR", "CRITICAL"):
                         dhcp_obs.append(obs)
                         target_entity = obs.entity_id
-            elif isinstance(obs, MetricObservation) and "DHCP" in obs.entity_id.upper():
+            elif isinstance(obs, MetricObservation) and (
+                obs.entity_id in dhcp_entities
+                or (not profile_roles_configured and "DHCP" in obs.entity_id.upper())
+            ):
                 if (obs.metric_name == "packet_loss_pct" and obs.value >= 50.0) or (
                     obs.metric_name == "latency_ms" and obs.value >= 1000.0
                 ):
@@ -412,26 +434,19 @@ class ServicesTower:
     def handle_task(self, task: InvestigationTask) -> TaskResult:
         """Handles supervisor-authorized persistent investigation tasks."""
         now = datetime.now(timezone.utc)
-        cap = task.capability
-
-        if cap in ("INVESTIGATE_DNS", "INVESTIGATE_DHCP", "ANALYZE_CONFIG_DRIFT"):
-            return TaskResult(
-                result_id=generate_id("RES-SERV"),
-                task_id=task.task_id,
-                assignee=self.tower_id,
-                status=TaskStatus.COMPLETED,
-                result_schema="netcoop://schemas/tasks/services-investigation-result/1.0",
-                result={"capability": cap, "status": "investigation_completed"},
-                completed_at=now,
-            )
-
+        result, finding_refs, evidence_refs, warnings = investigate_with_engine(
+            self.engine, self.repository, task
+        )
         return TaskResult(
             result_id=generate_id("RES-SERV"),
             task_id=task.task_id,
             assignee=self.tower_id,
-            status=TaskStatus.FAILED,
-            result_schema="netcoop://schemas/tasks/error-result/1.0",
-            warnings=[f"Unsupported capability: {cap}"],
+            status=TaskStatus.COMPLETED,
+            result_schema=task.expected_result_schema,
+            result=result,
+            finding_refs=finding_refs,
+            evidence_refs=evidence_refs,
+            warnings=warnings,
             completed_at=now,
         )
 

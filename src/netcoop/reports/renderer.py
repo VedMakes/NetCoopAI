@@ -31,6 +31,21 @@ def render_markdown_report(report: FinalReport, gate_result: Any | None = None) 
     else:
         lines.append("- None detected / not applicable")
 
+    if report.concurrent_causes:
+        lines.extend(["", "**Concurrent suspected causes:**"])
+        lines.extend(f"- {cause}" for cause in report.concurrent_causes)
+
+    if report.inferred_affected_entities:
+        lines.extend(["", "**Inferred affected entities (from topology):**"])
+        lines.extend(f"- `{entity}`" for entity in report.inferred_affected_entities)
+
+    if report.network_profile:
+        lines.extend([
+            "",
+            f"**Network profile:** `{report.network_profile.get('profile_id', 'unknown')}` "
+            f"v{report.network_profile.get('version', 'unknown')}",
+        ])
+
     lines.extend([
         "",
         "---",
@@ -40,11 +55,13 @@ def render_markdown_report(report: FinalReport, gate_result: Any | None = None) 
     ])
 
     if report.supporting_evidence:
-        lines.append("| Metric / Check | Observed Value | Clinical Interpretation |")
+        lines.append("| Metric / Check | Observed Value | Interpretation |")
         lines.append("|---|---|---|")
         for item in report.supporting_evidence:
             val_str = str(item.value) if item.value is not None else "N/A"
-            lines.append(f"| `{item.metric}` | {val_str} | {item.interpretation} |")
+            unit = f" {item.unit}" if item.unit else ""
+            when = f" at {item.observed_at.isoformat()}" if item.observed_at else ""
+            lines.append(f"| `{item.metric}` | {val_str}{unit} | {item.interpretation}{when} |")
     else:
         lines.append("_No corroborating evidence required or supervisor abstained._")
 
@@ -89,6 +106,26 @@ def render_markdown_report(report: FinalReport, gate_result: Any | None = None) 
             lines.append(f"- {lim}")
     else:
         lines.append("- Full telemetry coverage; no significant limitations recorded.")
+
+    if report.data_quality_warnings:
+        lines.extend(["", "### Input data quality"])
+        lines.extend(f"- {warning}" for warning in report.data_quality_warnings)
+
+    if report.orchestration_warnings:
+        lines.extend(["", "### Specialist investigation"])
+        lines.extend(f"- {warning}" for warning in report.orchestration_warnings)
+
+    if report.peer_interactions:
+        lines.extend(["", "### Peer queries"])
+        for interaction in report.peer_interactions:
+            result = interaction.get("result") or {}
+            reachable = result.get("reachable")
+            outcome = f"reachable={reachable}" if isinstance(reachable, bool) else "result returned"
+            lines.append(
+                f"- `{interaction.get('requester')}` → `{interaction.get('recipient')}` "
+                f"`{interaction.get('capability')}` on {interaction.get('scope')}: "
+                f"{interaction.get('status')} ({outcome}); evidence {interaction.get('evidence_refs', [])}"
+            )
 
     if gate_result is not None:
         lines.extend([

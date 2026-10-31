@@ -66,7 +66,9 @@ def test_supervisor_runtime_end_to_end_on_incident(
     assert final_report.incident_id == "INC-2026-001"
     assert final_report.status == "diagnosed"
     assert "LINK_CONGESTION" in final_report.suspected_root_cause
-    assert final_report.confidence > 0.6
+    # This fixture is a single snapshot; keep the diagnosis explicitly low confidence.
+    assert final_report.confidence <= 0.5
+    assert final_report.confidence_category == ConfidenceCategory.LOW
     assert len(final_report.affected_devices) > 0
     assert len(final_report.supporting_evidence) > 0
     assert len(final_report.recommended_actions) > 0
@@ -357,6 +359,8 @@ def test_supervisor_conflict_classification_and_task_dispatch():
     assert proposal.decision == ProposalDecision.REQUEST_EVIDENCE
     assert len(proposal.requested_tasks) > 0
     assert proposal.requested_tasks[0]["capability"] == "INVESTIGATE_DEVICE"
+    assert proposal.requested_tasks[0]["assignee"] == TowerId.INFRASTRUCTURE.value
+    assert proposal.requested_tasks[0]["objective"]["target_entities"] == ["SW_DIST_1:Gi0/1", "SW_DIST_1"]
     assert manifest.contradiction_ids == ["LINK_CONGESTION", "DEVICE_OVERLOAD"]
 
     # In round 2 with task history, provider arbitrates
@@ -367,6 +371,91 @@ def test_supervisor_conflict_classification_and_task_dispatch():
     assert proposal2.decision == ProposalDecision.PROPOSE_DIAGNOSIS
     # Hardware/overload has higher causal priority than downstream congestion
     assert "DEVICE_OVERLOAD" in proposal2.suspected_root_cause
+
+
+def test_disjoint_supported_hypotheses_are_reported_as_concurrent_causes():
+    now = datetime.now(timezone.utc)
+    findings = [
+        Finding(
+            finding_id="F-DNS", incident_id="INC-MULTI", source_tower=TowerId.SERVICES,
+            producer="services.engine", finding_type="dns_resolution_failure", severity=Severity.HIGH,
+            entity_refs=["SRV_DNS_01"], evidence_refs=["OBS-DNS"], confidence=0.9,
+            independence_group="dns", observed_at=now, created_at=now, description="DNS query failures",
+        ),
+        Finding(
+            finding_id="F-LINK", incident_id="INC-MULTI", source_tower=TowerId.PERFORMANCE,
+            producer="performance.engine", finding_type="congestion_candidate", severity=Severity.HIGH,
+            entity_refs=["SW_CORE_01:Gi0/2"], evidence_refs=["OBS-LINK"], confidence=0.88,
+            independence_group="link", observed_at=now, created_at=now, description="Sustained queue pressure",
+        ),
+    ]
+    hypotheses = [
+        Hypothesis(
+            hypothesis_id="H-DNS", incident_id="INC-MULTI", fault_code="DNS_FAILURE",
+            suspected_entities=["SRV_DNS_01"], supporting_finding_refs=["F-DNS"],
+            confidence_score=0.9, confidence_category=ConfidenceCategory.HIGH,
+            rationale="Resolver errors", created_at=now,
+        ),
+        Hypothesis(
+            hypothesis_id="H-LINK", incident_id="INC-MULTI", fault_code="LINK_CONGESTION",
+            suspected_entities=["SW_CORE_01:Gi0/2"], supporting_finding_refs=["F-LINK"],
+            confidence_score=0.88, confidence_category=ConfidenceCategory.HIGH,
+            rationale="Queue drops under high utilization", created_at=now,
+        ),
+    ]
+    dossier = IncidentDossier(
+        incident_id="INC-MULTI", findings=findings, hypotheses=hypotheses,
+        tower_reports={},
+    )
+
+    proposal, _ = DeterministicRCAProvider().diagnose(dossier)
+    assert proposal.decision == ProposalDecision.PROPOSE_DIAGNOSIS
+    assert proposal.concurrent_causes == ["LINK_CONGESTION: ['SW_CORE_01:Gi0/2']"]
+    assert set(proposal.supporting_finding_refs) == {"F-DNS", "F-LINK"}
+
+
+def test_connectivity_peer_result_changes_dns_vs_routing_arbitration():
+    now = datetime.now(timezone.utc)
+    findings = [
+        Finding(
+            finding_id="F-ROUTE", incident_id="INC-DNS-ROUTE", source_tower=TowerId.CONNECTIVITY,
+            producer="connectivity.engine", finding_type="path_interruption", severity=Severity.HIGH,
+            entity_refs=["HOSTEL_ZONE_A"], evidence_refs=["OBS-PATH"], confidence=0.85,
+            independence_group="path", observed_at=now, created_at=now, description="Path symptoms",
+        ),
+        Finding(
+            finding_id="F-DNS-ROUTE", incident_id="INC-DNS-ROUTE", source_tower=TowerId.SERVICES,
+            producer="services.engine", finding_type="dns_resolution_failure", severity=Severity.HIGH,
+            entity_refs=["SRV_DNS_01"], evidence_refs=["OBS-DNS"], confidence=0.85,
+            independence_group="dns", observed_at=now, created_at=now, description="DNS failures",
+        ),
+    ]
+    hypotheses = [
+        Hypothesis(
+            hypothesis_id="H-ROUTE", incident_id="INC-DNS-ROUTE", fault_code="ROUTING_FAILURE",
+            suspected_entities=["SW_CORE_01"], supporting_finding_refs=["F-ROUTE"],
+            confidence_score=0.85, confidence_category=ConfidenceCategory.HIGH,
+            rationale="Possible path failure", created_at=now,
+        ),
+        Hypothesis(
+            hypothesis_id="H-DNS-ROUTE", incident_id="INC-DNS-ROUTE", fault_code="DNS_FAILURE",
+            suspected_entities=["SRV_DNS_01"], supporting_finding_refs=["F-DNS-ROUTE"],
+            confidence_score=0.85, confidence_category=ConfidenceCategory.HIGH,
+            rationale="Possible resolver failure", created_at=now,
+        ),
+    ]
+    dossier = IncidentDossier(
+        incident_id="INC-DNS-ROUTE", findings=findings, hypotheses=hypotheses,
+        investigation_round=2,
+        peer_query_history=[{
+            "status": "completed", "capability": "connectivity.trace_path",
+            "result": {"reachable": True, "path": ["HOSTEL_ZONE_A", "SRV_DNS_01"]},
+        }],
+    )
+
+    proposal, _ = DeterministicRCAProvider().diagnose(dossier)
+
+    assert "DNS_FAILURE" in (proposal.suspected_root_cause or "")
 
 
 def test_supervisor_budget_exhaustion_limits_task_dispatch(memory_repo: SQLiteRepository):

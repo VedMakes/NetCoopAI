@@ -7,7 +7,7 @@ This script provides an interactive, live demonstration walkthrough of the NetCo
 ## Executive Summary & Narrative Hook (30 seconds)
 
 > **Speaker / Presenter:**
-> *"Campus and enterprise networks generate millions of telemetry signals every hour. When outages happen, Network Operations Centers (NOCs) are overwhelmed with cascading alarms across switches, Wi-Fi access points, and service daemons. NetCoop AI solves this using an autonomous multi-agent cooperative architecture. Four domain specialist towers collaborate across an asynchronous message fabric, synthesized by a Supervisory RCA Agent, and certified by a zero-hallucination Evidence Release Gate. Most importantly: NetCoop AI runs 100% offline, deterministically, with zero mandatory cloud LLM dependencies."*
+> *"Campus and enterprise networks generate signals across switches, Wi-Fi access points, and services. NetCoop AI uses four domain towers with typed event, query, and task communication. The supervisor combines their evidence, and an independent gate checks the report's citations and incident scope. The deterministic diagnosis path runs without an LLM."*
 
 ---
 
@@ -59,11 +59,12 @@ uv run netcoop diagnose fixtures/scenarios/link_congestion
    - **Infrastructure Tower:** Verified hardware health (CPU & memory nominal), ruling out device overheating or CPU exhaustion.
    - **Connectivity Tower:** Correlated blast radius across downstream hostel distribution switches.
    - **Services Tower:** Verified DNS and DHCP transactions remain nominal.
-3. **Evidence Release Gate Verification:**
+3. **Inter-agent query trace:** Run `uv run netcoop diagnose fixtures/scenarios/dns_failure --format json` and show the Services tower's bounded `connectivity.trace_path` query to Connectivity and its returned path evidence in `peer_interactions`.
+4. **Evidence Release Gate Verification:**
    - Shows the gate verifying that every single citation references a valid, unmodified canonical observation ID from the incident history.
    - Status: `PASS_WITH_CORRECTIONS` or `PASS`.
-4. **Final Synthesized Diagnosis & Recommendations:**
-   - Suspected Root Cause with calibrated confidence score (`0.65`).
+5. **Final Synthesized Diagnosis & Recommendations:**
+   - Suspected root cause with a confidence estimate (`0.65`) and cited samples, including units and timestamps.
    - Actionable remediation recommendations (e.g., dynamic QoS queue reprioritization or link aggregation).
 
 ### Exporting Reports (JSON & Markdown):
@@ -80,7 +81,7 @@ cat report.json | jq .
 
 ---
 
-## Act 4: The Zero-Hallucination Evidence Gate & Clean Abstention (45 seconds)
+## Act 4: Evidence Checks & Clean Abstention (45 seconds)
 
 Show how NetCoop AI handles normal, healthy telemetry without hallucinating false positive alarms.
 
@@ -90,7 +91,7 @@ uv run netcoop diagnose fixtures/scenarios/healthy
 ```
 
 ### What to highlight:
-- **Calibrated Abstention:** When metrics are within normal baseline thresholds, the system does not invent problems to look clever.
+- **Conservative Abstention:** When metrics are within normal baseline thresholds, the system reports insufficient evidence for a fault.
 - **Outcome:** Gate Outcome `ABSTAIN` with confidence `0.0`.
 - **NOC Value:** Drastically reduces alert fatigue by certifying healthy network operation.
 
@@ -105,6 +106,11 @@ Execute the end-to-end multi-scenario benchmark with a single command to prove s
 uv run netcoop demo
 ```
 
+For the reproducible, multi-seed scorecard against NetCoop's own generator, run:
+```bash
+uv run python scripts/evaluate_generator.py --seeds 7,42,2026
+```
+
 ### What to highlight:
 - Runs automatically across all 5 primary benchmark scenarios:
   1. `Healthy Baseline` -> Diagnosed as `ABSTAIN` (clean non-escalation).
@@ -112,7 +118,7 @@ uv run netcoop demo
   3. `Weak Wi-Fi` -> Diagnosed as `WEAK_WIFI` on `AP_HOSTEL_01`.
   4. `Device Overload` -> Diagnosed as `DEVICE_OVERLOAD` on `SW_CORE_01`.
   5. `DNS Resolver Failure` -> Diagnosed as `DNS_FAILURE` on `SRV_DNS_01`.
-- **Zero LLM Calls Required:** 100% deterministic, zero latency jitter, fully auditable.
+- **No LLM Required:** The diagnosis path is deterministic and emits an inspectable report and communication trace.
 - **All Findings Gate-Certified:** Zero hallucinations or ungrounded claims.
 
 ---
@@ -122,4 +128,4 @@ uv run netcoop demo
 1. **True Specialist Architecture:** Not a monolithic prompt; four modular domain towers with bounded vocabularies and distinct responsibilities.
 2. **Deterministic-First, LLM-Optional:** Works completely offline without API keys, but seamlessly upgrades with `--llm auto` or `--llm on` when keys are provided.
 3. **Rigorous Guardrails:** The Evidence Release Gate programmatically rejects unverified or fabricated claims.
-4. **Production-Grade Engineering:** Comprehensive test suite (132 unit tests), SQLite event/finding store, Rich terminal UI, and CLI automation.
+4. **Reproducible Engineering:** Test suite (180 tests), SQLite event/finding store, Rich terminal UI, and CLI automation.

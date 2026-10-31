@@ -12,10 +12,10 @@ from __future__ import annotations
 import csv
 import json
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from netcoop.configuration.profile import NetworkProfile
 from netcoop.ingestion.aliases import EntityAliasResolver
 from netcoop.ingestion.normalization import (
     NormalizationWarning,
@@ -64,8 +64,67 @@ class IngestionBatchResult:
 class TelemetryLoader:
     """Loads and normalizes telemetry data from multiple source formats."""
 
-    def __init__(self, alias_resolver: EntityAliasResolver | None = None) -> None:
-        self.alias_resolver = alias_resolver or EntityAliasResolver()
+    def __init__(
+        self,
+        alias_resolver: EntityAliasResolver | None = None,
+        profile: NetworkProfile | None = None,
+    ) -> None:
+        self.profile = profile
+        if alias_resolver is not None:
+            self.alias_resolver = alias_resolver
+        elif profile is not None:
+            self.alias_resolver = EntityAliasResolver(
+                profile.aliases(), include_campus_defaults=False
+            )
+        else:
+            self.alias_resolver = EntityAliasResolver()
+
+    def _metric_name(self, source_name: str) -> tuple[str | None, str | None]:
+        mapping = self.profile.map_metric(source_name) if self.profile else None
+        if mapping:
+            return mapping.canonical_name, None
+        aliases = (
+            {name: spec.canonical_name for name, spec in self.profile.metric_mappings.items()}
+            if self.profile else None
+        )
+        return normalize_metric_name(source_name, aliases)
+
+    def _profile_unit(self, source_name: str, raw_unit: str | None) -> str | None:
+        if raw_unit or self.profile is None:
+            return raw_unit
+        mapping = self.profile.map_metric(source_name)
+        return mapping.source_unit if mapping else raw_unit
+
+    def _field_candidates(self, canonical_field: str) -> list[str]:
+        if self.profile:
+            return self.profile.source_field_candidates(canonical_field)
+        return {
+            "entity_id": ["device_id", "entity_id", "device", "node"],
+            "timestamp": ["timestamp", "event_time", "time", "datetime"],
+            "metric": ["metric", "metric_name", "measurement"],
+            "value": ["value", "reading"],
+            "unit": ["unit", "units"],
+            "incident_id": ["incident_id"],
+            "source_id": ["source_id", "source"],
+            "metrics": ["metrics"],
+            "message": ["message", "msg"],
+            "log_level": ["log_level", "level", "severity"],
+            "facility": ["facility"],
+            "source_entity": ["source_entity", "src", "from"],
+            "target_entity": ["target_entity", "dst", "to"],
+            "relationship_type": ["relationship_type", "link_type", "type"],
+            "link_id": ["link_id", "id"],
+            "capacity_mbps": ["capacity_mbps", "speed_mbps", "capacity"],
+            "interface_name": ["interface_name", "source_interface", "interface"],
+            "consumer_entity": ["consumer_entity", "consumer", "client"],
+            "provider_entity": ["provider_entity", "provider", "server"],
+        }.get(canonical_field, [])
+
+    def _field(self, record: dict[str, Any], canonical_field: str) -> Any:
+        for candidate in self._field_candidates(canonical_field):
+            if candidate in record and record[candidate] is not None:
+                return record[candidate]
+        return None
 
     def load_file(
         self,
@@ -128,6 +187,14 @@ class TelemetryLoader:
                     else:
                         raise ValueError(f"Unrecognized observation_type: '{obs_type}'")
                     result.observations.append(obs)
+                    schema_version = raw_obs.get("schema_version", "1.0")
+                    if schema_version != "1.0":
+                        result.warnings.append(NormalizationWarning(
+                            record_id=raw_obs.get("observation_id", f"obs-{idx}"),
+                            warning_type="schema_version_warning",
+                            message=f"Unsupported schema_version {schema_version!r}; parsed best-effort as 1.0.",
+                            raw_value=schema_version,
+                        ))
                 except Exception as exc:
                     result.quarantined_records.append({"index": idx, "raw": raw_obs, "error": str(exc)})
                     result.warnings.append(
@@ -141,14 +208,14 @@ class TelemetryLoader:
             return result
 
         # 2. Organizer Single Record (Colab format)
-        if isinstance(data, dict) and "device_id" in data and "metrics" in data:
+        if isinstance(data, dict) and self._field(data, "entity_id") and isinstance(self._field(data, "metrics"), dict):
             self._parse_organizer_record(data, result, default_source)
             return result
 
         # 3. List of records (Organizer multi-step or array of records)
         if isinstance(data, list):
             for idx, item in enumerate(data):
-                if isinstance(item, dict) and "device_id" in item and "metrics" in item:
+                if isinstance(item, dict) and self._field(item, "entity_id") and isinstance(self._field(item, "metrics"), dict):
                     self._parse_organizer_record(item, result, default_source)
                 elif isinstance(item, dict) and "observation_type" in item:
                     try:
@@ -178,7 +245,15 @@ class TelemetryLoader:
         batch: IngestionBatchResult,
         default_source: str,
     ) -> None:
-        raw_dev = record.get("device_id", "")
+        schema_version = record.get("schema_version", "1.0")
+        if schema_version != "1.0":
+            batch.warnings.append(NormalizationWarning(
+                record_id=str(record.get("device_id", "unknown")),
+                warning_type="schema_version_warning",
+                message=f"Unsupported schema_version {schema_version!r}; recognized fields parsed best-effort as 1.0.",
+                raw_value=schema_version,
+            ))
+        raw_dev = self._field(record, "entity_id") or ""
         res = self.alias_resolver.resolve(str(raw_dev))
         entity_id = res.canonical_id
         if res.warning:
@@ -191,14 +266,15 @@ class TelemetryLoader:
                 )
             )
 
-        ts, ts_warn = normalize_timestamp(record.get("timestamp"))
+        raw_ts = self._field(record, "timestamp")
+        ts, ts_warn = normalize_timestamp(raw_ts)
         if ts_warn:
             batch.warnings.append(
                 NormalizationWarning(
                     record_id=entity_id,
                     warning_type="timestamp_warning",
                     message=ts_warn,
-                    raw_value=record.get("timestamp"),
+                    raw_value=raw_ts,
                 )
             )
         if ts is None:
@@ -207,7 +283,7 @@ class TelemetryLoader:
             )
             return
 
-        raw_metrics = record.get("metrics", {})
+        raw_metrics = self._field(record, "metrics") or {}
         if not isinstance(raw_metrics, dict):
             batch.quarantined_records.append(
                 {"raw": record, "error": "Metrics field must be a key-value dictionary."}
@@ -227,7 +303,7 @@ class TelemetryLoader:
                 )
                 continue
 
-            canon_name, name_warn = normalize_metric_name(raw_metric_name)
+            canon_name, name_warn = self._metric_name(raw_metric_name)
             if name_warn:
                 batch.warnings.append(
                     NormalizationWarning(
@@ -239,7 +315,9 @@ class TelemetryLoader:
                 )
                 continue
 
-            val, unit, val_warns = normalize_metric_value_and_unit(canon_name, raw_val, None)
+            val, unit, val_warns = normalize_metric_value_and_unit(
+                canon_name, raw_val, self._profile_unit(raw_metric_name, None)
+            )
             for w in val_warns:
                 batch.warnings.append(
                     NormalizationWarning(
@@ -279,7 +357,8 @@ class TelemetryLoader:
 
             # Detect wide vs narrow CSV
             # Narrow: has 'metric_name' and 'value'
-            is_narrow = any(fn.lower() in ("metric_name", "metric", "measurement") for fn in fieldnames)
+            metric_fields = {name.casefold() for name in self._field_candidates("metric")}
+            is_narrow = any(fn.lower() in metric_fields for fn in fieldnames)
 
             for row_idx, row in enumerate(reader):
                 try:
@@ -299,13 +378,13 @@ class TelemetryLoader:
         batch: IngestionBatchResult,
         default_source: str,
     ) -> None:
-        raw_dev = row.get("device_id") or row.get("entity_id") or row.get("device") or ""
+        raw_dev = self._field(row, "entity_id") or ""
         res = self.alias_resolver.resolve(raw_dev)
         entity_id = res.canonical_id
         if res.warning:
             batch.warnings.append(NormalizationWarning(entity_id, "alias_warning", res.warning, raw_dev))
 
-        raw_ts = row.get("timestamp") or row.get("time") or row.get("datetime")
+        raw_ts = self._field(row, "timestamp")
         ts, ts_warn = normalize_timestamp(raw_ts)
         if ts_warn:
             batch.warnings.append(NormalizationWarning(entity_id, "timestamp_warning", ts_warn, raw_ts))
@@ -313,13 +392,13 @@ class TelemetryLoader:
             batch.quarantined_records.append({"row_index": row_idx, "row": row, "error": "Missing timestamp"})
             return
 
-        raw_metric = row.get("metric_name") or row.get("metric") or ""
-        canon_metric, name_warn = normalize_metric_name(raw_metric)
+        raw_metric = self._field(row, "metric") or ""
+        canon_metric, name_warn = self._metric_name(raw_metric)
         if name_warn:
             batch.warnings.append(NormalizationWarning(entity_id, "unknown_metric", name_warn, raw_metric))
             return
 
-        raw_val = row.get("value")
+        raw_val = self._field(row, "value")
         if raw_val is None or str(raw_val).strip() == "":
             batch.warnings.append(
                 NormalizationWarning(
@@ -331,8 +410,10 @@ class TelemetryLoader:
             )
             return
 
-        raw_unit = row.get("unit")
-        val, unit, val_warns = normalize_metric_value_and_unit(canon_metric, raw_val, raw_unit)
+        raw_unit = self._field(row, "unit")
+        val, unit, val_warns = normalize_metric_value_and_unit(
+            canon_metric, raw_val, self._profile_unit(raw_metric, raw_unit)
+        )
         for w in val_warns:
             batch.warnings.append(NormalizationWarning(f"{entity_id}:{canon_metric}", "value_quality", w, raw_val))
 
@@ -357,13 +438,13 @@ class TelemetryLoader:
         batch: IngestionBatchResult,
         default_source: str,
     ) -> None:
-        raw_dev = row.get("device_id") or row.get("entity_id") or row.get("device") or ""
+        raw_dev = self._field(row, "entity_id") or ""
         res = self.alias_resolver.resolve(raw_dev)
         entity_id = res.canonical_id
         if res.warning:
             batch.warnings.append(NormalizationWarning(entity_id, "alias_warning", res.warning, raw_dev))
 
-        raw_ts = row.get("timestamp") or row.get("time") or row.get("datetime")
+        raw_ts = self._field(row, "timestamp")
         ts, ts_warn = normalize_timestamp(raw_ts)
         if ts_warn:
             batch.warnings.append(NormalizationWarning(entity_id, "timestamp_warning", ts_warn, raw_ts))
@@ -372,7 +453,11 @@ class TelemetryLoader:
             return
 
         # Any column other than device/timestamp is treated as a metric
-        reserved_cols = {"device_id", "entity_id", "device", "timestamp", "time", "datetime", "incident_id", "source"}
+        reserved_cols = {
+            name.casefold()
+            for field_name in ("entity_id", "timestamp", "incident_id", "source_id")
+            for name in self._field_candidates(field_name)
+        }
         for col_name, raw_val in row.items():
             if not col_name or col_name.lower() in reserved_cols:
                 continue
@@ -388,12 +473,14 @@ class TelemetryLoader:
                 )
                 continue
 
-            canon_metric, name_warn = normalize_metric_name(col_name)
+            canon_metric, name_warn = self._metric_name(col_name)
             if name_warn:
                 # Column is not a known canonical metric
                 continue
 
-            val, unit, val_warns = normalize_metric_value_and_unit(canon_metric, raw_val, None)
+            val, unit, val_warns = normalize_metric_value_and_unit(
+                canon_metric, raw_val, self._profile_unit(col_name, None)
+            )
             for w in val_warns:
                 batch.warnings.append(NormalizationWarning(f"{entity_id}:{canon_metric}", "value_quality", w, raw_val))
 
@@ -444,24 +531,66 @@ class TelemetryLoader:
                             result.observations.append(ConfigObservation.model_validate(record))
                         continue
 
-                    raw_dev = record.get("device_id") or record.get("entity_id") or "UNKNOWN"
+                    raw_dev = self._field(record, "entity_id") or "UNKNOWN"
                     res = self.alias_resolver.resolve(raw_dev)
-                    raw_ts = record.get("timestamp") or record.get("event_time") or record.get("time")
-                    ts, _ = normalize_timestamp(raw_ts)
+                    raw_ts = self._field(record, "timestamp")
+                    ts, timestamp_warning = normalize_timestamp(raw_ts)
                     if ts is None:
-                        ts = datetime.now(timezone.utc)
+                        result.quarantined_records.append({
+                            "line_index": line_idx,
+                            "raw": record,
+                            "error": "Missing or unparseable timestamp; record quarantined.",
+                        })
+                        result.warnings.append(NormalizationWarning(
+                            record_id=str(record.get("observation_id", f"line-{line_idx}")),
+                            warning_type="timestamp_error",
+                            message="Missing or unparseable timestamp; record quarantined.",
+                            raw_value=raw_ts,
+                        ))
+                        continue
+                    if timestamp_warning:
+                        result.warnings.append(NormalizationWarning(
+                            record_id=str(record.get("observation_id", f"line-{line_idx}")),
+                            warning_type="timestamp_warning",
+                            message=timestamp_warning,
+                            raw_value=raw_ts,
+                        ))
 
                     # Check if metric event
-                    raw_metric = record.get("metric") or record.get("metric_name")
-                    if raw_metric and "value" in record:
-                        canon_metric, name_warn = normalize_metric_name(raw_metric)
+                    raw_metric = self._field(record, "metric")
+                    raw_value = self._field(record, "value")
+                    if raw_metric and raw_value is not None:
+                        canon_metric, name_warn = self._metric_name(raw_metric)
+                        if not canon_metric:
+                            result.quarantined_records.append({
+                                "line_index": line_idx,
+                                "raw": record,
+                                "error": name_warn or f"Unmapped metric {raw_metric!r}",
+                            })
+                            result.warnings.append(NormalizationWarning(
+                                record_id=str(record.get("observation_id", f"line-{line_idx}")),
+                                warning_type="unmapped_metric",
+                                message=name_warn or f"Unmapped metric {raw_metric!r}",
+                                raw_value=raw_metric,
+                            ))
+                            continue
                         if canon_metric:
-                            val, unit, _ = normalize_metric_value_and_unit(canon_metric, record["value"], record.get("unit"))
+                            val, unit, unit_warnings = normalize_metric_value_and_unit(
+                                canon_metric, raw_value,
+                                self._profile_unit(raw_metric, self._field(record, "unit")),
+                            )
+                            for warning in unit_warnings:
+                                result.warnings.append(NormalizationWarning(
+                                    record_id=str(record.get("observation_id", f"line-{line_idx}")),
+                                    warning_type="value_quality",
+                                    message=warning,
+                                    raw_value=raw_value,
+                                ))
                             if val is not None and unit is not None:
                                 metric_obs = MetricObservation(
                                     observation_id=generate_id("OBS"),
-                                    incident_id=record.get("incident_id", incident_id),
-                                    source=record.get("source_id", default_source),
+                                    incident_id=self._field(record, "incident_id") or incident_id,
+                                    source=self._field(record, "source_id") or default_source,
                                     entity_id=res.canonical_id,
                                     metric_name=canon_metric,
                                     value=val,
@@ -471,16 +600,22 @@ class TelemetryLoader:
                                 )
                                 result.observations.append(metric_obs)
                                 continue
+                            result.quarantined_records.append({
+                                "line_index": line_idx,
+                                "raw": record,
+                                "error": "Metric value or unit could not be normalized.",
+                            })
+                            continue
 
                     # Otherwise normalize structured log record
                     log_obs = LogObservation(
                         observation_id=generate_id("OBS"),
-                        incident_id=record.get("incident_id", incident_id),
-                        source=record.get("source", default_source),
+                        incident_id=self._field(record, "incident_id") or incident_id,
+                        source=self._field(record, "source_id") or default_source,
                         entity_id=res.canonical_id,
-                        log_level=str(record.get("log_level") or record.get("level") or "INFO").upper(),
-                        message=str(record.get("message") or record.get("msg") or ""),
-                        facility=record.get("facility"),
+                        log_level=str(self._field(record, "log_level") or "INFO").upper(),
+                        message=str(self._field(record, "message") or ""),
+                        facility=self._field(record, "facility"),
                         timestamp=ts,
                         raw_reference={"line_index": line_idx, "raw_log": record},
                     )

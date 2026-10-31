@@ -260,6 +260,17 @@ Fields:
 
 Persist findings and TaskResult before emitting the task-completed event.
 
+### Implemented diagnostic artifact (`netcoop://schemas/tasks/diagnostic-artifact/1.0`)
+
+Tower task handlers return a JSON object with these fields:
+
+- `incident_id`, `capability`, `target_entities`
+- `findings` and `hypotheses` as serialized canonical contracts (empty for topology-only results)
+- `observation_count` and `summary` for telemetry investigations
+- `analysis` for topology investigations, with the capability-specific result fields
+
+`TaskResult.finding_refs` and `TaskResult.evidence_refs` repeat the artifact references for routing and audit. The runtime checks the declared result schema, validates finding and hypothesis contracts and incident IDs, then merges accepted findings into the supervisor dossier before its next reasoning pass. Failed, incomplete, or invalid task results remain in task history and are surfaced as orchestration warnings. The supervisor continues to own the incident conclusion.
+
 ## 4.6 Finding reference invariants
 
 A finding is a persisted diagnostic record. Events and TaskResults reference it by ID.
@@ -275,6 +286,10 @@ Minimum fields should include:
 - optional `supersedes_finding_id`
 
 A finding is immutable. Create a new record to supersede or retract a finding.
+
+## Implemented end-to-end peer query
+
+For DNS/DHCP diagnoses with declared service dependencies, the Services tower requests `connectivity.trace_path` from Connectivity for each unique affected consumer/provider pair (up to eight queries per incident). The supervisor records typed requests and responses in `IncidentDossier.peer_query_history`, uses completed results to distinguish service failures from path failures, and publishes the exchanges in `FinalReport.peer_interactions`. Both DNS (`HOSTEL_ZONE_A` to `SRV_DNS_01`) and DHCP (`HOSTEL_ZONE_A` to `SRV_DHCP_01`) generator cases are covered; a compound case exercises both paths. Path evidence includes topology observation IDs. Missing dependency data produces no guessed query, and a missing path in partial or unknown topology returns `reachable: null` instead of claiming a partition.
 
 # 5. EventBus requirements
 

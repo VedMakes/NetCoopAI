@@ -7,11 +7,11 @@ meets all objective publication standards, citation provenance, scope, and fresh
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from netcoop.models.enums import ConfidenceCategory, FindingStatus, ProposalDecision
 from netcoop.models.findings import Finding
-from netcoop.models.observations import CanonicalObservation
+from netcoop.models.observations import CanonicalObservation, TopologyObservation
 from netcoop.models.reports import FinalReport, SupportingEvidenceItem
 from netcoop.supervisor.models import GateCheckResult, GateOutcome, GateResult
 
@@ -31,6 +31,30 @@ def _confidence_to_numeric(category: ConfidenceCategory, has_limitations: bool) 
     return mapping.get(category, 0.50)
 
 
+def _infer_affected_entities(
+    roots: list[str], observations: list[CanonicalObservation]
+) -> list[str]:
+    """Infer direct impact from explicit topology and dependency relationships."""
+    root_set = set(roots)
+    inferred: list[str] = []
+    for obs in observations:
+        if not isinstance(obs, TopologyObservation):
+            continue
+        if obs.interface_name in root_set:
+            inferred.extend([obs.source_entity, obs.target_entity])
+        elif obs.relationship_type in {"dns", "dhcp", "wireless_access"}:
+            if obs.target_entity in root_set:
+                inferred.append(obs.source_entity)
+            if obs.relationship_type == "wireless_access" and obs.source_entity in root_set:
+                inferred.append(obs.target_entity)
+        elif obs.relationship_type == "connected_to":
+            if obs.source_entity in root_set:
+                inferred.append(obs.target_entity)
+            if obs.target_entity in root_set:
+                inferred.append(obs.source_entity)
+    return list(dict.fromkeys(entity for entity in inferred if entity not in root_set))
+
+
 class EvidenceReleaseGate:
     """Independent deterministic release verifier for case-level diagnostic proposals."""
 
@@ -45,6 +69,10 @@ class EvidenceReleaseGate:
         known_observations: list[CanonicalObservation] | None = None,
         known_findings: list[Finding] | None = None,
         competing_hypotheses: list[str] | None = None,
+        data_quality_warnings: list[str] | None = None,
+        orchestration_warnings: list[str] | None = None,
+        peer_interactions: list[dict[str, Any]] | None = None,
+        network_profile: dict[str, str] | None = None,
     ) -> GateResult:
         """Evaluates a supervisor proposal and claim manifest against known incident facts."""
         inc_id = incident_id or proposal.incident_id
@@ -74,6 +102,11 @@ class EvidenceReleaseGate:
             for f in self.repo.get_findings(inc_id):
                 findings_map[f.finding_id] = f
 
+        data_quality_warnings = list(dict.fromkeys(data_quality_warnings or []))
+        orchestration_warnings = list(dict.fromkeys(orchestration_warnings or []))
+        peer_interactions = peer_interactions or []
+        observations_for_impact = known_observations or list(obs_map.values())
+
         # Handle explicit Abstention proposals
         if proposal.decision == ProposalDecision.ABSTAIN:
             if not proposal.abstain_reason:
@@ -101,6 +134,10 @@ class EvidenceReleaseGate:
                 evidence_sources=[],
                 limitations=["Diagnostic engines abstained due to ambiguity or insufficient evidence."],
                 confidence_category=ConfidenceCategory.INSUFFICIENT,
+                data_quality_warnings=data_quality_warnings,
+                orchestration_warnings=orchestration_warnings,
+                peer_interactions=peer_interactions,
+                network_profile=network_profile,
                 generated_at=datetime.now(timezone.utc),
             )
             return GateResult(
@@ -191,7 +228,14 @@ class EvidenceReleaseGate:
                 checks.append(GateCheckResult(check_name="finding_provenance", passed=True, message=warn, severity="warning"))
 
         # 4. Check Observation Existence and Scope from Manifest
-        cited_obs_ids: set[str] = set()
+        cited_obs_ids: list[str] = []
+        seen_obs_ids: set[str] = set()
+
+        def cite_observation(obs_id: str) -> None:
+            if obs_id not in seen_obs_ids:
+                seen_obs_ids.add(obs_id)
+                cited_obs_ids.append(obs_id)
+
         if manifest is not None:
             # Check manifest finding references
             for mf_id in manifest.finding_ids:
@@ -202,7 +246,7 @@ class EvidenceReleaseGate:
 
             # Check manifest observation references
             for obs_id in manifest.observation_ids:
-                cited_obs_ids.add(obs_id)
+                cite_observation(obs_id)
                 if obs_id not in obs_map:
                     err = f"Manifest cites invented or missing observation ID '{obs_id}'."
                     errors.append(err)
@@ -217,7 +261,7 @@ class EvidenceReleaseGate:
         # Check observation IDs cited by findings
         for f in cited_findings:
             for obs_id in f.evidence_refs:
-                cited_obs_ids.add(obs_id)
+                cite_observation(obs_id)
                 if obs_id not in obs_map:
                     warn = f"Finding '{f.finding_id}' links observation '{obs_id}' which is not in known observations."
                     warnings.append(warn)
@@ -226,7 +270,10 @@ class EvidenceReleaseGate:
         if competing_hypotheses:
             for alt in competing_hypotheses:
                 # Disclosed if in proposal alternative_causes or in manifest contradiction disclosures
-                disclosed = alt in proposal.alternative_causes
+                disclosed = alt in proposal.alternative_causes or alt in proposal.concurrent_causes
+                primary_code = (proposal.suspected_root_cause or "").split(":", 1)[0]
+                if primary_code and alt.startswith(f"{primary_code}: "):
+                    disclosed = True
                 if manifest and (alt in manifest.contradiction_ids or any(alt in d for d in manifest.contradiction_disclosures)):
                     disclosed = True
 
@@ -242,6 +289,16 @@ class EvidenceReleaseGate:
         independence_groups: set[str] = set()
         for f in cited_findings:
             independence_groups.add(f.independence_group or f.source_tower.value)
+            qualifying = f.metadata.get("qualifying_samples")
+            observed = f.metadata.get("observed_samples")
+            if isinstance(qualifying, int) and isinstance(observed, int) and observed > 0:
+                coverage = qualifying / observed
+                if qualifying < 3 or coverage < 0.5:
+                    limitation = (
+                        f"{f.finding_type} on {', '.join(f.entity_refs)} has limited temporal support: "
+                        f"{qualifying} qualifying sample(s) out of {observed}; verify persistence before remediation."
+                    )
+                    limitations.append(limitation)
 
         if len(independence_groups) <= 1 and proposal.confidence_category == ConfidenceCategory.HIGH:
             warn = "Proposal claims HIGH confidence but supporting evidence is from only a single independence group."
@@ -262,16 +319,41 @@ class EvidenceReleaseGate:
             )
 
         # If observations available, include up to 5 top observation metrics
-        for obs_id in list(cited_obs_ids)[:5]:
+        selected_obs_ids: list[str] = []
+        selected_metric_keys: set[tuple[str, str]] = set()
+        for obs_id in cited_obs_ids:
+            obs = obs_map.get(obs_id)
+            metric_name = getattr(obs, "metric_name", None) if obs is not None else None
+            if metric_name is not None:
+                key = (obs.entity_id, metric_name)
+                if key not in selected_metric_keys:
+                    selected_metric_keys.add(key)
+                    selected_obs_ids.append(obs_id)
+        for obs_id in cited_obs_ids:
+            if obs_id not in selected_obs_ids:
+                selected_obs_ids.append(obs_id)
+
+        for obs_id in selected_obs_ids[:5]:
             if obs_id in obs_map:
                 obs = obs_map[obs_id]
-                val = getattr(obs, "value", None) or getattr(obs, "message", None) or getattr(obs, "connected_entity", "N/A")
+                val = getattr(obs, "value", None)
+                if val is None:
+                    val = getattr(obs, "message", None)
+                if val is None:
+                    val = getattr(obs, "connected_entity", None)
+                if val is None:
+                    val = "N/A"
                 metric_name = getattr(obs, "metric_name", None) or obs.observation_type
+                unit = getattr(obs, "unit", None)
                 evidence_items.append(
                     SupportingEvidenceItem(
                         metric=f"raw.{obs.entity_id}.{metric_name}",
                         value=val,
                         interpretation=f"Source observation {obs_id} from {obs.source}",
+                        entity_id=obs.entity_id,
+                        unit=unit,
+                        observed_at=obs.timestamp,
+                        source=obs.source,
                     )
                 )
 
@@ -281,6 +363,8 @@ class EvidenceReleaseGate:
             outcome = GateOutcome.REJECT
             certified_report = None
         else:
+            warnings.extend(data_quality_warnings)
+            warnings.extend(orchestration_warnings)
             has_warnings_or_limitations = bool(warnings or limitations)
             outcome = GateOutcome.PASS_WITH_LIMITATIONS if has_warnings_or_limitations else GateOutcome.PASS
 
@@ -292,13 +376,21 @@ class EvidenceReleaseGate:
                 status="diagnosed",
                 suspected_root_cause=proposal.suspected_root_cause or "UNKNOWN",
                 confidence=num_conf,
-                affected_devices=proposal.affected_entities,
+                affected_devices=list(dict.fromkeys(
+                    proposal.affected_entities + _infer_affected_entities(proposal.affected_entities, observations_for_impact)
+                )),
+                inferred_affected_entities=_infer_affected_entities(proposal.affected_entities, observations_for_impact),
                 supporting_evidence=evidence_items,
                 alternative_causes=proposal.alternative_causes,
                 recommended_actions=proposal.recommended_actions,
                 evidence_sources=sorted(list(independence_groups)),
                 limitations=all_limits,
                 confidence_category=proposal.confidence_category,
+                concurrent_causes=proposal.concurrent_causes,
+                data_quality_warnings=data_quality_warnings,
+                orchestration_warnings=orchestration_warnings,
+                peer_interactions=peer_interactions,
+                network_profile=network_profile,
                 generated_at=datetime.now(timezone.utc),
             )
 

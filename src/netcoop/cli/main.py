@@ -7,13 +7,16 @@ and offline demonstration.
 
 from __future__ import annotations
 
+import csv
 import json
 import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 import typer
+import yaml
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
@@ -22,8 +25,10 @@ from netcoop import __version__
 from netcoop.communication.fabric import IntegrationFabric
 from netcoop.communication.registry import CapabilityRegistry
 from netcoop.communication.vocabulary import load_vocabulary
+from netcoop.configuration.profile import MetricMapping, NetworkProfile
 from netcoop.features.pipeline import FeaturePipeline
 from netcoop.ingestion.loaders import TelemetryLoader
+from netcoop.ingestion.normalization import normalize_metric_name, normalize_metric_value_and_unit
 from netcoop.models.observations import (
     CanonicalObservation,
     ConfigObservation,
@@ -40,6 +45,7 @@ from netcoop.supervisor.agent import (
 )
 from netcoop.supervisor.gate import EvidenceReleaseGate
 from netcoop.supervisor.runtime import EvidenceGateRejectionError, SupervisorRuntime
+from netcoop.towers.rules import load_rules
 from netcoop.utils.env import load_dotenv
 from netcoop.utils.id_generator import generate_id
 
@@ -261,12 +267,19 @@ def ingest(
 
 
 def _load_observations_from_target(
-    target_path: Path, incident_id: str | None = None
+    target_path: Path,
+    incident_id: str | None = None,
+    data_quality_warnings: list[str] | None = None,
+    profile: NetworkProfile | None = None,
 ) -> tuple[str, list[CanonicalObservation]]:
     """Loads telemetry and optional topology from a file or scenario directory."""
-    loader = TelemetryLoader()
+    loader = TelemetryLoader(profile=profile)
     observations: list[CanonicalObservation] = []
     resolved_inc_id = incident_id
+
+    def source_field(record: dict[str, Any], field_name: str, defaults: list[str]) -> Any:
+        names = profile.source_field_candidates(field_name) if profile else defaults
+        return next((record[name] for name in names if name in record and record[name] is not None), None)
 
     if target_path.is_dir():
         # Check for telemetry file
@@ -279,33 +292,110 @@ def _load_observations_from_target(
         if telemetry_file:
             batch = loader.load_file(telemetry_file, incident_id=incident_id)
             observations.extend(batch.observations)
+            if data_quality_warnings is not None:
+                data_quality_warnings.extend(
+                    f"{telemetry_file.name}: {warning.warning_type}: {warning.message}"
+                    for warning in batch.warnings
+                )
+                data_quality_warnings.extend(
+                    f"{telemetry_file.name}: quarantined record {item.get('line_index', item.get('row_index', item.get('index', '?')))}: {item.get('error', 'invalid record')}"
+                    for item in batch.quarantined_records
+                )
             if not resolved_inc_id and batch.observations:
                 resolved_inc_id = batch.observations[0].incident_id
 
         # Check for topology.json
         topo_file = target_path / "topology.json"
         if topo_file.exists():
-            with open(topo_file, "r", encoding="utf-8") as f:
-                topo_data = json.load(f)
+            try:
+                with open(topo_file, "r", encoding="utf-8") as f:
+                    topo_data = json.load(f)
+                if not isinstance(topo_data, dict):
+                    raise ValueError("topology root must be a JSON object")
+            except (OSError, json.JSONDecodeError, ValueError) as exc:
+                topo_data = {}
+                if data_quality_warnings is not None:
+                    data_quality_warnings.append(f"topology.json: topology file ignored: {exc}")
+            version = topo_data.get("schema_version")
+            if version not in (None, "1.0") and data_quality_warnings is not None:
+                data_quality_warnings.append(
+                    f"topology.json: schema version {version!r} is not recognized; best-effort parsing used"
+                )
             now = datetime.now(timezone.utc)
             t_inc = resolved_inc_id or "INC-TOPOLOGY"
-            for link in topo_data.get("links", []):
-                obs = TopologyObservation(
-                    observation_id=link.get("link_id", generate_id("TOPO")),
-                    incident_id=t_inc,
-                    source="topology_json",
-                    entity_id=link["source_entity"],
-                    source_entity=link["source_entity"],
-                    target_entity=link["target_entity"],
-                    relationship_type="connected_to",
-                    link_speed_mbps=link.get("capacity_mbps"),
-                    interface_name=link.get("source_interface"),
-                    timestamp=now,
+            links = topo_data.get("links", [])
+            if not isinstance(links, list):
+                links = []
+                if data_quality_warnings is not None:
+                    data_quality_warnings.append("topology.json: links must be a list; links ignored")
+            for index, link in enumerate(links):
+                try:
+                    if not isinstance(link, dict):
+                        raise ValueError("link must be an object")
+                    source = source_field(link, "source_entity", ["source_entity"])
+                    target = source_field(link, "target_entity", ["target_entity"])
+                    if not source or not target:
+                        raise ValueError("link requires source_entity and target_entity")
+                    obs = TopologyObservation(
+                        observation_id=source_field(link, "link_id", ["link_id"]) or generate_id("TOPO"),
+                        incident_id=t_inc,
+                        source="topology_json",
+                        entity_id=profile.canonical_entity(source) if profile else source,
+                        source_entity=profile.canonical_entity(source) if profile else source,
+                        target_entity=profile.canonical_entity(target) if profile else target,
+                        relationship_type=(profile.canonical_relationship(
+                            str(source_field(link, "relationship_type", ["relationship_type", "link_type"]) or "connected_to")
+                        ) if profile else str(source_field(link, "relationship_type", ["relationship_type", "link_type"]) or "connected_to")),
+                        link_speed_mbps=source_field(link, "capacity_mbps", ["capacity_mbps"]),
+                        interface_name=source_field(link, "interface_name", ["source_interface", "interface_name"]),
+                        timestamp=now,
+                    )
+                    observations.append(obs)
+                except Exception as exc:
+                    if data_quality_warnings is not None:
+                        data_quality_warnings.append(f"topology.json: skipped link {index}: {exc}")
+            dependencies = topo_data.get("service_dependencies", [])
+            if not isinstance(dependencies, list):
+                dependencies = []
+                if data_quality_warnings is not None:
+                    data_quality_warnings.append("topology.json: service_dependencies must be a list; dependencies ignored")
+            for index, dependency in enumerate(dependencies):
+                if not isinstance(dependency, dict):
+                    if data_quality_warnings is not None:
+                        data_quality_warnings.append(f"topology.json: skipped service dependency {index}: expected object")
+                    continue
+                consumer = source_field(dependency, "consumer_entity", ["consumer_entity"])
+                provider = source_field(dependency, "provider_entity", ["provider_entity"])
+                if not consumer or not provider:
+                    if data_quality_warnings is not None:
+                        data_quality_warnings.append("topology.json: skipped service dependency missing consumer/provider")
+                    continue
+                observations.append(
+                    TopologyObservation(
+                        observation_id=f"DEP-{dependency.get('consumer_entity')}-{dependency.get('provider_entity')}-{dependency.get('dependency_type', 'unknown')}",
+                        incident_id=t_inc,
+                        source="topology_json",
+                        entity_id=profile.canonical_entity(consumer) if profile else consumer,
+                        source_entity=profile.canonical_entity(consumer) if profile else consumer,
+                        target_entity=profile.canonical_entity(provider) if profile else provider,
+                        relationship_type=(profile.canonical_relationship(
+                            str(source_field(dependency, "relationship_type", ["dependency_type", "relationship_type"]) or "depends_on")
+                        ) if profile else str(source_field(dependency, "relationship_type", ["dependency_type", "relationship_type"]) or "depends_on")),
+                        timestamp=now,
+                    )
                 )
-                observations.append(obs)
     else:
         batch = loader.load_file(target_path, incident_id=incident_id)
         observations.extend(batch.observations)
+        if data_quality_warnings is not None:
+            data_quality_warnings.extend(
+                f"{target_path.name}: {warning.warning_type}: {warning.message}"
+                for warning in batch.warnings
+            )
+            data_quality_warnings.extend(
+                f"{target_path.name}: quarantined record {item.get('line_index', item.get('row_index', item.get('index', '?')))}: {item.get('error', 'invalid record')}"
+                for item in batch.quarantined_records
+            )
         if not resolved_inc_id and batch.observations:
             resolved_inc_id = batch.observations[0].incident_id
 
@@ -315,9 +405,112 @@ def _load_observations_from_target(
     aligned: list[CanonicalObservation] = []
     for obs in observations:
         if obs.incident_id != resolved_inc_id:
-            aligned.append(obs.model_copy(update={"incident_id": resolved_inc_id}))
-        else:
-            aligned.append(obs)
+            obs = obs.model_copy(update={"incident_id": resolved_inc_id})
+        if profile and isinstance(obs, MetricObservation):
+            mapping = profile.map_metric(obs.metric_name)
+            if mapping:
+                value, unit, warnings = normalize_metric_value_and_unit(
+                    mapping.canonical_name, obs.value, mapping.source_unit or obs.unit
+                )
+                if value is None or unit is None:
+                    if data_quality_warnings is not None:
+                        data_quality_warnings.extend(
+                            f"Profile {profile.profile_id}: {warning}" for warning in warnings
+                        )
+                    continue
+                obs = obs.model_copy(update={
+                    "entity_id": profile.canonical_entity(obs.entity_id),
+                    "metric_name": mapping.canonical_name,
+                    "value": value,
+                    "unit": unit,
+                })
+            else:
+                obs = obs.model_copy(update={"entity_id": profile.canonical_entity(obs.entity_id)})
+        elif profile and isinstance(obs, TopologyObservation):
+            rel = obs.relationship_type.casefold()
+            obs = obs.model_copy(update={
+                "entity_id": profile.canonical_entity(obs.entity_id),
+                "source_entity": profile.canonical_entity(obs.source_entity),
+                "target_entity": profile.canonical_entity(obs.target_entity),
+                "relationship_type": profile.canonical_relationship(rel),
+            })
+        elif profile:
+            obs = obs.model_copy(update={"entity_id": profile.canonical_entity(obs.entity_id)})
+        aligned.append(obs)
+
+    # Convert configured monotonic counters into interval deltas before the
+    # towers see them. A first sample is only a baseline, never an incident.
+    if profile:
+        counter_groups: dict[tuple[str, str], list[tuple[int, MetricObservation]]] = {}
+        for index, obs in enumerate(aligned):
+            if not isinstance(obs, MetricObservation):
+                continue
+            raw_ref = obs.raw_reference or {}
+            raw_record = raw_ref.get("raw_record", {})
+            raw_row = raw_ref.get("raw_row", {})
+            configured_metric_fields = profile.source_field_candidates("metric")
+            source_name = (
+                raw_ref.get("raw_metric")
+                or next((raw_record[name] for name in configured_metric_fields if name in raw_record), None)
+                or next((raw_row[name] for name in configured_metric_fields if name in raw_row), None)
+                or raw_ref.get("column") or obs.metric_name
+            )
+            mapping = profile.map_metric(str(source_name))
+            if mapping and mapping.counter_semantics == "cumulative_counter":
+                counter_groups.setdefault((obs.entity_id, obs.metric_name), []).append((index, obs))
+
+        excluded: set[int] = set()
+        replacements: dict[int, MetricObservation] = {}
+        for (_entity_id, metric_name), samples in counter_groups.items():
+            samples.sort(key=lambda item: (item[1].timestamp, item[1].observation_id))
+            previous: MetricObservation | None = None
+            seen_timestamps: set[datetime] = set()
+            for index, current in samples:
+                if current.timestamp in seen_timestamps:
+                    excluded.add(index)
+                    if data_quality_warnings is not None:
+                        data_quality_warnings.append(
+                            f"Profile {profile.profile_id}: duplicate timestamp for cumulative counter "
+                            f"{current.entity_id}.{metric_name}; sample {current.observation_id} skipped"
+                        )
+                    continue
+                seen_timestamps.add(current.timestamp)
+                if previous is None:
+                    excluded.add(index)
+                    previous = current
+                    if data_quality_warnings is not None:
+                        data_quality_warnings.append(
+                            f"Profile {profile.profile_id}: first cumulative counter sample for "
+                            f"{current.entity_id}.{metric_name} used as baseline"
+                        )
+                    continue
+                elapsed = (current.timestamp - previous.timestamp).total_seconds()
+                if elapsed <= 0 or current.value < previous.value:
+                    excluded.add(index)
+                    if data_quality_warnings is not None:
+                        reason = "non-increasing timestamp" if elapsed <= 0 else "counter reset/decrease"
+                        data_quality_warnings.append(
+                            f"Profile {profile.profile_id}: {reason} for cumulative counter "
+                            f"{current.entity_id}.{metric_name}; interval skipped"
+                        )
+                    previous = current
+                    continue
+                raw_reference = dict(current.raw_reference or {})
+                raw_reference["counter_interval"] = {
+                    "semantics": "cumulative_counter",
+                    "previous_observation_id": previous.observation_id,
+                    "interval_seconds": elapsed,
+                }
+                replacements[index] = current.model_copy(update={
+                    "value": current.value - previous.value,
+                    "raw_reference": raw_reference,
+                })
+                previous = current
+        aligned = [
+            replacements.get(index, obs)
+            for index, obs in enumerate(aligned)
+            if index not in excluded
+        ]
 
     return resolved_inc_id, aligned
 
@@ -335,9 +528,28 @@ def diagnose(
     output_path: Path | None = typer.Option(None, "--output", "-o", help="Optional file path to write report"),
     llm: str = typer.Option("off", "--llm", help="LLM mode: off (deterministic), auto, on"),
     db_path: Path | None = typer.Option(None, "--db", help="Optional SQLite database to persist incident records"),
+    profile_path: Path | None = typer.Option(
+        None, "--profile", help="Optional versioned network profile YAML", exists=True, readable=True
+    ),
 ):
     """Executes end-to-end incident diagnosis across all 4 towers and the Evidence Release Gate."""
-    inc_id, observations = _load_observations_from_target(target_path, incident_id=incident_id)
+    data_quality_warnings: list[str] = []
+    try:
+        network_profile = NetworkProfile.load(profile_path) if profile_path else None
+        if network_profile:
+            network_profile.apply_to_rules(load_rules())
+    except Exception as exc:
+        console.print(f"[bold red]Network profile error:[/bold red] {exc}")
+        raise typer.Exit(code=2)
+    inc_id, observations = _load_observations_from_target(
+        target_path, incident_id=incident_id, data_quality_warnings=data_quality_warnings,
+        profile=network_profile,
+    )
+    if network_profile and network_profile.topology_completeness != "complete":
+        data_quality_warnings.append(
+            f"Profile {network_profile.profile_id} marks topology "
+            f"{network_profile.topology_completeness}; missing links are not treated as proof of an outage."
+        )
 
     if not observations:
         console.print(f"[bold red]No observations loaded from {target_path}.[/bold red]")
@@ -354,12 +566,21 @@ def diagnose(
         raise typer.Exit(code=1)
 
     rca_agent = SupervisoryRCAAgent(provider=rca_provider, llm_mode=llm)
-    fabric = IntegrationFabric(repository=repo)
+    profile_rules = network_profile.apply_to_rules(load_rules()) if network_profile else None
+    fabric = IntegrationFabric(repository=repo, rules=profile_rules)
     gate = EvidenceReleaseGate(repository=repo)
-    runtime = SupervisorRuntime(fabric=fabric, repository=repo, rca_agent=rca_agent, gate=gate)
+    runtime = SupervisorRuntime(
+        fabric=fabric, repository=repo, rca_agent=rca_agent, gate=gate,
+        network_profile=(
+            {"profile_id": network_profile.profile_id, "version": network_profile.version}
+            if network_profile else None
+        ),
+    )
 
     try:
-        report = runtime.run_incident(inc_id, observations)
+        report = runtime.run_incident(
+            inc_id, observations, data_quality_warnings=data_quality_warnings
+        )
         gate_res = repo.get_gate_result(inc_id)
     except EvidenceGateRejectionError as e:
         console.print(f"[bold red]Evidence Release Gate Rejection:[/bold red] {e}")
@@ -444,6 +665,239 @@ def diagnose(
         md_text = render_markdown_report(report, gate_result=gate_res)
         output_path.write_text(md_text, encoding="utf-8")
         console.print(f"[green]Saved summary report to {output_path}[/green]")
+
+
+@app.command("profile-validate")
+def profile_validate(
+    profile_path: Path = typer.Argument(..., exists=True, readable=True, help="Network profile YAML"),
+    data_path: Path | None = typer.Option(
+        None, "--data", exists=True, readable=True,
+        help="Optional telemetry file or scenario directory to check mappings against",
+    ),
+):
+    """Validate a network profile and optionally inspect it against sample telemetry."""
+    try:
+        profile = NetworkProfile.load(profile_path)
+        profile.apply_to_rules(load_rules())
+    except Exception as exc:
+        console.print(f"[bold red]Invalid profile:[/bold red] {exc}")
+        raise typer.Exit(code=2)
+
+    table = Table(title=f"Network Profile: {profile.display_name}")
+    table.add_column("Check", style="bold")
+    table.add_column("Result")
+    table.add_row("Identity", f"{profile.profile_id} v{profile.version}")
+    table.add_row("Entity aliases", str(len(profile.entity_aliases)))
+    table.add_row("Metric mappings", str(len(profile.metric_mappings)))
+    table.add_row("Topology anchors", ", ".join(profile.topology_anchors) or "NOT CONFIGURED")
+    table.add_row("Entity roles", str(sum(len(roles) for roles in profile.entity_roles.values())))
+
+    warnings: list[str] = []
+    if not profile.topology_anchors:
+        warnings.append("No topology anchors configured; common-uplink and blast-radius analysis will be limited.")
+    if not profile.entities_for_role("dns_resolver"):
+        warnings.append("No dns_resolver role configured; DNS metrics on non-DNS-named entities may be missed.")
+    if not profile.entities_for_role("dhcp_server"):
+        warnings.append("No dhcp_server role configured; DHCP metrics on non-DHCP-named entities may be missed.")
+    if data_path:
+        incident_id, observations = _load_observations_from_target(
+            data_path, data_quality_warnings=warnings, profile=profile
+        )
+        observed_entities = {
+            entity
+            for obs in observations
+            for entity in (
+                [obs.entity_id]
+                + ([obs.source_entity, obs.target_entity] if isinstance(obs, TopologyObservation) else [])
+            )
+        }
+        present_anchors = [
+            anchor for anchor in profile.topology_anchors
+            if profile.canonical_entity(anchor) in observed_entities
+        ]
+        table.add_row("Sample incident", incident_id)
+        table.add_row("Normalized observations", str(len(observations)))
+        table.add_row(
+            "Anchors present",
+            f"{len(present_anchors)}/{len(profile.topology_anchors)}" if profile.topology_anchors else "not configured",
+        )
+        table.add_row("Input warnings", str(len(warnings)))
+        missing_roles = [
+            role for role in ("dns_resolver", "dhcp_server")
+            if profile.entities_for_role(role)
+            and not profile.entities_for_role(role).intersection(observed_entities)
+        ]
+        table.add_row("Configured service roles missing", ", ".join(missing_roles) or "none")
+
+    console.print(table)
+    if warnings:
+        console.print("\n[bold yellow]Profile/data warnings:[/bold yellow]")
+        for warning in warnings[:12]:
+            console.print(f"- {warning}")
+        if len(warnings) > 12:
+            console.print(f"... and {len(warnings) - 12} more")
+
+
+def _inspect_profile_input(
+    path: Path, source_fields: dict[str, list[str]] | None = None
+) -> tuple[set[str], dict[str, set[str]], set[str]]:
+    """Collect source field names without assigning meaning to entities or metrics."""
+    source_fields = source_fields or {}
+
+    def candidates(canonical: str, defaults: list[str]) -> list[str]:
+        return [*source_fields.get(canonical, []), *defaults]
+
+    def get_source_value(record: dict[str, object], canonical: str, defaults: list[str]) -> object | None:
+        return next((record[name] for name in candidates(canonical, defaults)
+                     if name in record and record[name] is not None), None)
+
+    source = path
+    if source.is_dir():
+        source = next(
+            (source / name for name in ("telemetry.jsonl", "telemetry.csv", "telemetry.json")
+             if (source / name).exists()),
+            source,
+        )
+    metrics: set[str] = set()
+    units: dict[str, set[str]] = {}
+    entities: set[str] = set()
+
+    def visit(record: object) -> None:
+        if isinstance(record, list):
+            for item in record:
+                visit(item)
+            return
+        if not isinstance(record, dict):
+            return
+        entity = get_source_value(record, "entity_id", ["device_id", "entity_id", "device", "node"])
+        if entity:
+            entities.add(str(entity))
+        metric_name = get_source_value(record, "metric", ["metric", "metric_name", "measurement"])
+        if metric_name:
+            name = str(metric_name)
+            metrics.add(name)
+            raw_unit = get_source_value(record, "unit", ["unit", "units"])
+            if raw_unit:
+                units.setdefault(name, set()).add(str(raw_unit))
+        raw_metrics = get_source_value(record, "metrics", ["metrics"])
+        if isinstance(raw_metrics, dict):
+            for name, value in raw_metrics.items():
+                metrics.add(str(name))
+                if isinstance(value, dict) and value.get("unit"):
+                    units.setdefault(str(name), set()).add(str(value["unit"]))
+        observations = record.get("observations")
+        if isinstance(observations, list):
+            visit(observations)
+
+    if source.suffix.lower() == ".csv":
+        with source.open(newline="", encoding="utf-8-sig") as stream:
+            reader = csv.DictReader(stream)
+            columns = set(reader.fieldnames or [])
+            metric_columns = {name.casefold() for name in candidates("metric", ["metric", "metric_name", "measurement"])}
+            if any(column.casefold() in metric_columns for column in columns):
+                for row in reader:
+                    visit(row)
+            else:
+                structural = {
+                    name.casefold()
+                    for field_name, defaults in (
+                        ("timestamp", ["timestamp", "event_time", "time", "datetime"]),
+                        ("entity_id", ["device_id", "entity_id", "device", "node"]),
+                        ("incident_id", ["incident_id"]),
+                        ("source_id", ["source_id", "source"]),
+                    )
+                    for name in candidates(field_name, defaults)
+                }
+                metrics.update(columns - structural)
+                for row in reader:
+                    entity = get_source_value(row, "entity_id", ["device_id", "entity_id", "device", "node"])
+                    if entity:
+                        entities.add(entity)
+    elif source.suffix.lower() == ".jsonl" or source.suffix.lower() == ".log":
+        for line in source.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                try:
+                    visit(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+    else:
+        visit(json.loads(source.read_text(encoding="utf-8")))
+    return metrics, units, entities
+
+
+@app.command("profile-init")
+def profile_init(
+    data_path: Path = typer.Argument(..., exists=True, readable=True, help="Sample telemetry or scenario directory"),
+    output_path: Path = typer.Option(Path("network-profile.yaml"), "--output", "-o", help="Draft profile path"),
+    display_name: str = typer.Option("New network", "--name", help="Human-readable network name"),
+    source_field_options: list[str] = typer.Option(
+        [], "--source-field", help="Map a canonical field to a source field, e.g. entity_id=node (repeatable)"
+    ),
+):
+    """Create a conservative profile draft from source field names, metrics, and units."""
+    source_fields: dict[str, list[str]] = {}
+    allowed_source_fields = {
+        "entity_id", "timestamp", "metric", "value", "unit",
+        "incident_id", "source_id", "metrics", "message", "log_level", "facility",
+        "source_entity", "target_entity", "relationship_type", "link_id",
+        "capacity_mbps", "interface_name", "consumer_entity", "provider_entity",
+    }
+    for option in source_field_options:
+        canonical, separator, source_name = option.partition("=")
+        canonical = canonical.strip()
+        source_name = source_name.strip()
+        if not separator or canonical not in allowed_source_fields or not source_name:
+            console.print(
+                f"[bold red]Invalid --source-field {option!r}.[/bold red] "
+                f"Use FIELD=SOURCE_NAME where FIELD is one of {sorted(allowed_source_fields)}."
+            )
+            raise typer.Exit(code=2)
+        source_fields.setdefault(canonical, []).append(source_name)
+    try:
+        source_metrics, source_units, entities = _inspect_profile_input(data_path, source_fields)
+    except (OSError, json.JSONDecodeError, csv.Error) as exc:
+        console.print(f"[bold red]Could not inspect sample data:[/bold red] {exc}")
+        raise typer.Exit(code=2)
+
+    suggested_mappings: dict[str, MetricMapping] = {}
+    unmapped: list[str] = []
+    for source_name in sorted(source_metrics):
+        canonical, _ = normalize_metric_name(source_name)
+        if canonical is None:
+            unmapped.append(source_name)
+        elif canonical != source_name.strip().lower():
+            source_unit_set = source_units.get(source_name, set())
+            source_unit = next(iter(source_unit_set)) if len(source_unit_set) == 1 else None
+            suggested_mappings[source_name] = MetricMapping(
+                canonical_name=canonical, source_unit=source_unit
+            )
+
+    slug = "-".join("".join(ch.lower() if ch.isalnum() else " " for ch in display_name).split())
+    draft = NetworkProfile(
+        profile_id=slug or "network-profile",
+        display_name=display_name,
+        source_fields=source_fields,
+        metric_mappings=suggested_mappings,
+        topology_completeness="unknown",
+    )
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(
+        yaml.safe_dump(draft.model_dump(mode="json", exclude_none=True), sort_keys=False),
+        encoding="utf-8",
+    )
+    console.print(f"Draft profile written to {output_path}")
+    console.print(f"Found {len(entities)} entity names and {len(source_metrics)} source metric names.")
+    if source_fields:
+        console.print("Configured source fields: " + ", ".join(
+            f"{canonical}={name}" for canonical, names in source_fields.items() for name in names
+        ))
+    console.print("Review entity aliases, DNS/DHCP roles, topology anchors, and completeness before diagnosing.")
+    if entities:
+        console.print("Observed entity names: " + ", ".join(sorted(entities)[:30]))
+        if len(entities) > 30:
+            console.print(f"... and {len(entities) - 30} more")
+    if unmapped:
+        console.print("Unmapped metrics requiring explicit review: " + ", ".join(unmapped))
 
 
 @app.command()

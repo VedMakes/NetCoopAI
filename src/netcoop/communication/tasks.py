@@ -10,6 +10,8 @@ from netcoop.communication.events import EventEnvelope
 from netcoop.models.enums import TaskStatus, TowerId
 from netcoop.utils.id_generator import generate_id
 
+DIAGNOSTIC_TASK_ARTIFACT_SCHEMA = "netcoop://schemas/tasks/diagnostic-artifact/1.0"
+
 
 def _ensure_utc(dt: datetime) -> datetime:
     if dt.tzinfo is None:
@@ -150,6 +152,23 @@ class TaskResult(BaseModel):
     @classmethod
     def validate_utc(cls, v: datetime) -> datetime:
         return _ensure_utc(v)
+
+
+class DiagnosticTaskArtifact(BaseModel):
+    """Versioned result contract shared by bounded tower investigations."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    incident_id: str
+    capability: str
+    target_entities: list[str] = Field(default_factory=list)
+    findings: list[dict[str, Any]] = Field(default_factory=list)
+    hypotheses: list[dict[str, Any]] = Field(default_factory=list)
+    finding_refs: list[str] = Field(default_factory=list)
+    evidence_refs: list[str] = Field(default_factory=list)
+    observation_count: int | None = None
+    summary: str
+    analysis: dict[str, Any] | None = None
 
 
 TaskHandler = Callable[[InvestigationTask], TaskResult]
@@ -381,6 +400,8 @@ class TaskDispatcher:
                 "status": task.status.value,
                 "capability": task.capability,
                 "assignee": task.assignee.value,
+                "result_id": task.result_id,
+                "error_code": task.error_code,
             },
         )
         self.event_bus.publish(evt)

@@ -7,7 +7,7 @@ Runs 100% deterministically with LLM mode off; supports pluggable providers.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from netcoop.models.enums import ConfidenceCategory, ProposalDecision, TowerId
 from netcoop.models.reports import ClaimEvidenceManifest, SupervisorProposal
@@ -67,43 +67,62 @@ class DeterministicRCAProvider:
 
         # 3. Check if investigation task should be requested in round 1
         if dossier.investigation_round == 1 and not dossier.task_history:
+            task_requests: list[dict[str, Any]] = []
             for conflict in conflicts:
                 if conflict.recommended_discriminating_task:
-                    # Request targeted investigation task
-                    task_req = {
-                        "assignee": conflict.competing_towers[0].value,
-                        "capability": conflict.recommended_discriminating_task,
+                    capability = conflict.recommended_discriminating_task
+                    assignee = conflict.recommended_assignee
+                    if assignee is None:
+                        continue
+
+                    relevant_hypotheses = [
+                        h for h in dossier.hypotheses
+                        if h.fault_code in conflict.competing_hypotheses
+                    ]
+                    target_entities = list(dict.fromkeys(
+                        entity for hyp in relevant_hypotheses for entity in hyp.suspected_entities
+                    ))
+                    task_requests.append({
+                        "assignee": assignee.value,
+                        "capability": capability,
                         "objective": {
                             "incident_id": dossier.incident_id,
                             "conflict_type": conflict.conflict_type.value,
-                            "target_entities": dossier.affected_entities,
+                            "competing_hypotheses": conflict.competing_hypotheses,
+                            "target_entities": target_entities or dossier.affected_entities,
+                            "question": conflict.description,
                         },
-                    }
-                    proposal = SupervisorProposal(
-                        proposal_id=generate_id("PROP"),
-                        incident_id=dossier.incident_id,
-                        decision=ProposalDecision.REQUEST_EVIDENCE,
-                        suspected_root_cause=None,
-                        affected_entities=dossier.affected_entities,
-                        supporting_finding_refs=[f.finding_id for f in severe_findings[:2]],
-                        confidence_category=ConfidenceCategory.LOW,
-                        alternative_causes=conflict.competing_hypotheses,
-                        recommended_actions=[],
-                        abstain_reason=None,
-                        requested_tasks=[task_req],
-                        created_at=datetime.now(timezone.utc),
-                    )
-                    manifest = ClaimEvidenceManifest(
-                        incident_id=dossier.incident_id,
-                        claim=f"Ambiguity detected between {conflict.competing_hypotheses}; requesting discriminating evidence.",
-                        claimed_entities=dossier.affected_entities,
-                        finding_ids=[f.finding_id for f in severe_findings[:2]],
-                        observation_ids=[],
-                        independence_groups=[],
-                        contradiction_ids=conflict.competing_hypotheses,
-                        contradiction_disclosures=[conflict.description],
-                    )
-                    return proposal, manifest
+                    })
+
+            if task_requests:
+                all_competing = list(dict.fromkeys(
+                    code for conflict in conflicts for code in conflict.competing_hypotheses
+                ))
+                proposal = SupervisorProposal(
+                    proposal_id=generate_id("PROP"),
+                    incident_id=dossier.incident_id,
+                    decision=ProposalDecision.REQUEST_EVIDENCE,
+                    suspected_root_cause=None,
+                    affected_entities=dossier.affected_entities,
+                    supporting_finding_refs=[f.finding_id for f in severe_findings[:2]],
+                    confidence_category=ConfidenceCategory.LOW,
+                    alternative_causes=all_competing,
+                    recommended_actions=[],
+                    abstain_reason=None,
+                    requested_tasks=task_requests,
+                    created_at=datetime.now(timezone.utc),
+                )
+                manifest = ClaimEvidenceManifest(
+                    incident_id=dossier.incident_id,
+                    claim=f"Ambiguities detected between {all_competing}; requesting discriminating evidence.",
+                    claimed_entities=dossier.affected_entities,
+                    finding_ids=[f.finding_id for f in severe_findings[:2]],
+                    observation_ids=[],
+                    independence_groups=[],
+                    contradiction_ids=all_competing,
+                    contradiction_disclosures=[conflict.description for conflict in conflicts],
+                )
+                return proposal, manifest
 
         # 4. Formulate Primary Root Cause Proposal based on causal priority
         return self._arbitrate_diagnosis(dossier, conflicts)
@@ -122,6 +141,7 @@ class DeterministicRCAProvider:
                     competing_hypotheses=["LINK_CONGESTION", "DEVICE_OVERLOAD"],
                     description="Performance reports link congestion while Infrastructure reports device overload.",
                     recommended_discriminating_task="INVESTIGATE_DEVICE",
+                    recommended_assignee=TowerId.INFRASTRUCTURE,
                     disposition="Device CPU overload can induce buffer drops; or egress queue saturation can raise CPU.",
                 )
             )
@@ -135,6 +155,7 @@ class DeterministicRCAProvider:
                     competing_hypotheses=["DNS_FAILURE", "ROUTING_FAILURE"],
                     description="Services reports DNS query failures while Connectivity reports path interruption.",
                     recommended_discriminating_task="ANALYZE_REACHABILITY",
+                    recommended_assignee=TowerId.CONNECTIVITY,
                     disposition="DNS server may be healthy but unreachable due to backbone network partition.",
                 )
             )
@@ -153,6 +174,7 @@ class DeterministicRCAProvider:
                     competing_hypotheses=["LINK_CONGESTION", "UPLINK_SATURATION"],
                     description="Multiple leaf links show high latency/loss; suspected shared upstream chokepoint.",
                     recommended_discriminating_task="connectivity.inspect_common_upstream",
+                    recommended_assignee=TowerId.CONNECTIVITY,
                     disposition="Check common uplink switch in topology to avoid blaming healthy leaf links.",
                 )
             )
@@ -189,8 +211,13 @@ class DeterministicRCAProvider:
         has_partition = any(h.fault_code == "ROUTING_FAILURE" for h in hypotheses)
         has_dns = any(h.fault_code == "DNS_FAILURE" for h in hypotheses)
         if has_partition and has_dns:
-            # Demote DNS failure because path interruption isolates DNS resolver
-            priority_map["DNS_FAILURE"] = 30
+            reachability = self._task_reachability_result(dossier)
+            if reachability is False:
+                # A completed path probe supports a network partition over an independent DNS fault.
+                priority_map["DNS_FAILURE"] = 30
+            elif reachability is True:
+                # A reachable resolver path weakens routing as the explanation for DNS symptoms.
+                priority_map["ROUTING_FAILURE"] = 20
 
         # Sort hypotheses by adjusted priority * confidence_score
         def score_hyp(h: Hypothesis) -> float:
@@ -198,6 +225,7 @@ class DeterministicRCAProvider:
             return base_prio * (0.5 + h.confidence_score)
 
         ranked_hypotheses = sorted(hypotheses, key=score_hyp, reverse=True)
+        concurrent_causes: list[str] = []
 
         if not ranked_hypotheses:
             # Fallback to findings if hypotheses list was empty
@@ -211,10 +239,26 @@ class DeterministicRCAProvider:
                 return self._abstain_unresolved(dossier, "No conclusive faults or hypotheses identified.")
         else:
             primary_hyp = ranked_hypotheses[0]
+            coexisting_hypotheses = []
+            primary_entities = set(primary_hyp.suspected_entities)
+            explicitly_competing = {
+                code for conflict in conflicts for code in conflict.competing_hypotheses
+            }
+            for candidate in ranked_hypotheses[1:]:
+                disjoint = primary_entities.isdisjoint(candidate.suspected_entities)
+                is_classified_conflict = any(
+                    candidate.fault_code in conflict.competing_hypotheses
+                    for conflict in conflicts
+                )
+                if disjoint and not is_classified_conflict and candidate.fault_code not in explicitly_competing:
+                    coexisting_hypotheses.append(candidate)
+
             root_cause = f"{primary_hyp.fault_code}: {primary_hyp.rationale}"
-            supporting_findings = [
-                f for f in findings if f.finding_id in primary_hyp.supporting_finding_refs
-            ]
+            supported_hypotheses = [primary_hyp, *coexisting_hypotheses]
+            supporting_refs = {
+                finding_id for hyp in supported_hypotheses for finding_id in hyp.supporting_finding_refs
+            }
+            supporting_findings = [f for f in findings if f.finding_id in supporting_refs]
             if not supporting_findings:
                 # Correlate findings by suspected entities or source tower
                 supporting_findings = [
@@ -228,9 +272,12 @@ class DeterministicRCAProvider:
             alt_causes = [
                 f"{h.fault_code}: {h.suspected_entities}"
                 for h in ranked_hypotheses[1:]
-                if h.fault_code != primary_hyp.fault_code
+                if h.fault_code != primary_hyp.fault_code and h not in coexisting_hypotheses
             ]
             conf_cat = primary_hyp.confidence_category
+            concurrent_causes = [
+                f"{h.fault_code}: {h.suspected_entities}" for h in coexisting_hypotheses
+            ]
 
         # Collect evidence observation IDs from supporting findings
         all_obs_ids: list[str] = []
@@ -247,7 +294,10 @@ class DeterministicRCAProvider:
         affected_entities = list(dict.fromkeys(affected_entities))
 
         # Recommended safe read-only actions
-        rec_actions = self._generate_recommendations(root_cause)
+        cause_strings = [root_cause, *concurrent_causes]
+        rec_actions = list(dict.fromkeys(
+            action for cause in cause_strings for action in self._generate_recommendations(cause)
+        ))
 
         proposal = SupervisorProposal(
             proposal_id=generate_id("PROP"),
@@ -258,6 +308,7 @@ class DeterministicRCAProvider:
             supporting_finding_refs=[f.finding_id for f in supporting_findings],
             confidence_category=conf_cat,
             alternative_causes=alt_causes,
+            concurrent_causes=concurrent_causes,
             recommended_actions=rec_actions,
             abstain_reason=None,
             requested_tasks=[],
@@ -272,10 +323,44 @@ class DeterministicRCAProvider:
             observation_ids=all_obs_ids,
             independence_groups=sorted(list(independence_groups)),
             contradiction_ids=[c.competing_hypotheses[0] for c in conflicts if c.competing_hypotheses],
-            contradiction_disclosures=[c.description for c in conflicts],
+            contradiction_disclosures=[c.description for c in conflicts] + self._task_disclosures(dossier),
         )
 
         return proposal, manifest
+
+    @staticmethod
+    def _task_reachability_result(dossier: IncidentDossier) -> bool | None:
+        for entry in reversed(dossier.peer_query_history):
+            if entry.get("status") != "completed" or entry.get("capability") != "connectivity.trace_path":
+                continue
+            result = entry.get("result") or {}
+            if isinstance(result.get("reachable"), bool):
+                if result.get("warning") and "not found" in result["warning"].lower():
+                    continue
+                return result["reachable"]
+        for entry in reversed(dossier.task_history):
+            if entry.get("status") != "COMPLETED" or entry.get("capability") != "ANALYZE_REACHABILITY":
+                continue
+            result = entry.get("result") or {}
+            analysis = result.get("analysis", result)
+            if isinstance(analysis, dict) and isinstance(analysis.get("reachable"), bool):
+                if analysis.get("warning") and "not found" in analysis["warning"].lower():
+                    return None
+                return analysis["reachable"]
+        return None
+
+    @staticmethod
+    def _task_disclosures(dossier: IncidentDossier) -> list[str]:
+        disclosures = []
+        for entry in dossier.task_history:
+            result = entry.get("result") or {}
+            summary = result.get("summary")
+            analysis = result.get("analysis", result)
+            if summary:
+                disclosures.append(f"Task {entry.get('task_id')} ({entry.get('capability')}): {summary}")
+            if isinstance(analysis, dict) and analysis.get("warning"):
+                disclosures.append(f"Task {entry.get('task_id')} limitation: {analysis['warning']}")
+        return disclosures
 
     def _abstain_unresolved(self, dossier: IncidentDossier, reason: str) -> tuple[SupervisorProposal, ClaimEvidenceManifest]:
         proposal = SupervisorProposal(

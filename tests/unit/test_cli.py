@@ -24,6 +24,34 @@ def test_cli_version():
     assert "NetCoop AI version" in result.stdout
 
 
+def test_profile_init_accepts_vendor_field_names_and_preserves_them(tmp_path: Path):
+    data_path = tmp_path / "vendor.jsonl"
+    data_path.write_text(
+        json.dumps({
+            "observed_at": "2026-01-01T00:00:00Z", "node": "router-west",
+            "measurement": "latency", "reading": 0.025, "units": "seconds",
+        }) + "\n",
+        encoding="utf-8",
+    )
+    output_path = tmp_path / "profile.yaml"
+
+    result = runner.invoke(app, [
+        "profile-init", str(data_path), "--name", "Vendor lab", "--output", str(output_path),
+        "--source-field", "entity_id=node", "--source-field", "timestamp=observed_at",
+        "--source-field", "metric=measurement", "--source-field", "value=reading",
+        "--source-field", "unit=units",
+    ])
+
+    assert result.exit_code == 0, result.output
+    assert "Found 1 entity names and 1 source metric names" in result.output
+    assert "router-west" in result.output
+    from netcoop.configuration.profile import NetworkProfile
+
+    profile = NetworkProfile.load(output_path)
+    assert profile.source_fields["entity_id"] == ["node"]
+    assert profile.metric_mappings["latency"].canonical_name == "latency_ms"
+
+
 def test_cli_doctor():
     result = runner.invoke(app, ["doctor"])
     assert result.exit_code == 0

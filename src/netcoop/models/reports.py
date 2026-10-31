@@ -49,6 +49,7 @@ class SupervisorProposal(BaseModel):
     supporting_finding_refs: list[str] = Field(default_factory=list)
     confidence_category: ConfidenceCategory
     alternative_causes: list[str] = Field(default_factory=list)
+    concurrent_causes: list[str] = Field(default_factory=list)
     recommended_actions: list[str] = Field(default_factory=list)
     abstain_reason: str | None = None
     requested_tasks: list[dict[str, Any]] = Field(default_factory=list)
@@ -81,6 +82,10 @@ class SupportingEvidenceItem(BaseModel):
     metric: str
     value: Any
     interpretation: str
+    entity_id: str | None = None
+    unit: str | None = None
+    observed_at: datetime | None = None
+    source: str | None = None
 
 
 class FinalReport(BaseModel):
@@ -99,6 +104,12 @@ class FinalReport(BaseModel):
     evidence_sources: list[str] = Field(default_factory=list)
     limitations: list[str] = Field(default_factory=list)
     confidence_category: ConfidenceCategory = ConfidenceCategory.MODERATE
+    concurrent_causes: list[str] = Field(default_factory=list)
+    inferred_affected_entities: list[str] = Field(default_factory=list)
+    data_quality_warnings: list[str] = Field(default_factory=list)
+    orchestration_warnings: list[str] = Field(default_factory=list)
+    peer_interactions: list[dict[str, Any]] = Field(default_factory=list)
+    network_profile: dict[str, str] | None = None
     generated_at: datetime
 
     @field_validator("generated_at")

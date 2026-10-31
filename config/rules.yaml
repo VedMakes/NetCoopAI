@@ -59,6 +59,17 @@ infrastructure:
     - "drop"
 
 connectivity:
+  # Deployment-specific topology anchors; network profiles may replace this list.
+  topology_anchors:
+    - "GW_EDGE_01"
+    - "SW_CORE_01"
+  logical_relationships:
+    - "dns"
+    - "dhcp"
+    - "default_gateway"
+    - "uplink"
+    - "wireless_access"
+  topology_completeness: complete
   reachability_hop_limit: 15
   isolated_subgraph_min_nodes: 1
   path_failure_loss_threshold_pct: 100.0

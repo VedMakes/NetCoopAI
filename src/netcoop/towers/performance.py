@@ -30,6 +30,7 @@ from netcoop.models.hypotheses import Hypothesis
 from netcoop.models.observations import CanonicalObservation, MetricObservation
 from netcoop.models.reports import TowerReport
 from netcoop.storage.sqlite import SQLiteRepository
+from netcoop.towers.base import investigate_with_engine
 from netcoop.towers.rules import load_rules
 from netcoop.utils.id_generator import generate_id
 
@@ -124,7 +125,6 @@ class PerformanceEngine:
 
         # Calculate latency Z-score if multiple samples exist
         lat_spike = False
-        lat_evidence_ids: list[str] = []
         if len(lat_obs) >= 3:
             lat_values = [o.value for o in lat_obs]
             med = calculate_median(lat_values)
@@ -133,33 +133,76 @@ class PerformanceEngine:
             z_thresh = float(self.rules.get("robust_z_threshold", 3.0))
             if any(z >= z_thresh for z in z_scores):
                 lat_spike = True
-                lat_evidence_ids = [o.observation_id for o in lat_obs]
         elif lat_obs:
             max_lat = max(o.value for o in lat_obs)
             if max_lat >= float(self.rules.get("latency_ms_warning", 100.0)):
                 lat_spike = True
-                lat_evidence_ids = [o.observation_id for o in lat_obs]
 
         # Congestion signature: High utilization AND queue pressure or degradation
         is_elevated_util = max_util >= high_thresh or avg_util >= high_thresh
         has_pressure = (max_queue > 0) or lat_spike or (max_loss >= loss_thresh)
+        # Collectors can timestamp metrics from one poll a few milliseconds apart.
+        # Correlate within a five-second bucket, while keeping distinct 30-second
+        # generator samples separate.
+        def sample_bucket(obs: MetricObservation) -> int:
+            return int(obs.timestamp.timestamp() // 5)
 
-        if is_elevated_util and has_pressure:
-            evidence_obs = util_obs + queue_obs + loss_obs
-            evidence_ids = list(dict.fromkeys([o.observation_id for o in evidence_obs] + lat_evidence_ids))
+        def max_by_sample(observations: list[MetricObservation]) -> dict[int, float]:
+            values: dict[int, float] = {}
+            for observation in observations:
+                bucket = sample_bucket(observation)
+                values[bucket] = max(values.get(bucket, float("-inf")), observation.value)
+            return values
 
-            if max_util >= crit_thresh and max_queue >= q_crit:
+        queue_by_time = max_by_sample(queue_obs)
+        loss_by_time = max_by_sample(loss_obs)
+        latency_by_time = max_by_sample(lat_obs)
+        qualifying_times = {
+            sample_bucket(o) for o in util_obs
+            if o.value >= high_thresh and (
+                queue_by_time.get(sample_bucket(o), 0.0) > 0
+                or loss_by_time.get(sample_bucket(o), 0.0) >= loss_thresh
+                or latency_by_time.get(sample_bucket(o), 0.0)
+                >= float(self.rules.get("latency_ms_warning", 100.0))
+            )
+        }
+        min_persistent_samples = int(self.rules.get("min_persistent_samples", 2))
+        single_snapshot = len({sample_bucket(o) for o in util_obs}) == 1
+
+        if is_elevated_util and has_pressure and (
+            len(qualifying_times) >= min_persistent_samples
+            or (single_snapshot and bool(qualifying_times))
+        ):
+            evidence_obs = [
+                o for o in util_obs + queue_obs + loss_obs + lat_obs
+                if sample_bucket(o) in qualifying_times and (
+                    (o.metric_name == "link_utilization_pct" and o.value >= high_thresh)
+                    or (o.metric_name == "queue_drops" and o.value > 0)
+                    or (o.metric_name == "packet_loss_pct" and o.value >= loss_thresh)
+                    or (o.metric_name == "latency_ms" and o.value >= float(self.rules.get("latency_ms_warning", 100.0)))
+                )
+            ]
+            evidence_ids = list(dict.fromkeys(o.observation_id for o in evidence_obs))
+
+            if max_util >= crit_thresh and max_queue >= q_crit and len(qualifying_times) >= 3:
                 sev = Severity.CRITICAL
                 conf = 0.94
                 conf_cat = ConfidenceCategory.HIGH
-            elif max_util >= high_thresh and max_queue > 0:
+            elif max_util >= high_thresh and max_queue > 0 and len(qualifying_times) >= 3:
                 sev = Severity.HIGH
                 conf = 0.88
                 conf_cat = ConfidenceCategory.HIGH
             else:
                 sev = Severity.MEDIUM
-                conf = 0.72
-                conf_cat = ConfidenceCategory.MODERATE
+                conf = 0.55
+                conf_cat = ConfidenceCategory.LOW
+            if single_snapshot:
+                # A complete high-pressure snapshot is actionable, but cannot
+                # establish persistence without a time series.
+                if max_util >= crit_thresh and max_queue >= q_crit:
+                    sev = Severity.HIGH
+                conf = 0.45
+                conf_cat = ConfidenceCategory.LOW
 
             f_id = generate_id("F-PERF")
             now = datetime.now(timezone.utc)
@@ -178,7 +221,8 @@ class PerformanceEngine:
                 observed_at=util_obs[-1].timestamp,
                 created_at=now,
                 description=(
-                    f"Sustained link congestion on {entity_id}: peak utilization {max_util:.1f}%, "
+                    f"Link congestion candidate on {entity_id}: pressure in {len(qualifying_times)} "
+                    f"of {len(util_obs)} samples; peak utilization {max_util:.1f}%, "
                     f"max queue drops {max_queue:.0f}, packet loss {max_loss:.2f}%."
                 ),
                 metadata={
@@ -186,6 +230,8 @@ class PerformanceEngine:
                     "avg_utilization_pct": avg_util,
                     "max_queue_drops": max_queue,
                     "latency_spike": lat_spike,
+                    "qualifying_samples": len(qualifying_times),
+                    "observed_samples": len(util_obs),
                 },
             )
             findings.append(finding)
@@ -200,12 +246,38 @@ class PerformanceEngine:
                 confidence_score=conf,
                 confidence_category=conf_cat,
                 rationale=(
-                    f"High link utilization ({max_util:.1f}%) combined with egress queue drops ({max_queue:.0f}) "
-                    f"confirms link congestion on {entity_id}."
+                    f"Repeated high utilization and link pressure support congestion on {entity_id} "
+                    f"({len(qualifying_times)} correlated samples)."
                 ),
                 created_at=now,
             )
             hypotheses.append(hyp)
+
+        elif is_elevated_util and has_pressure:
+            transient_evidence = [
+                o for o in util_obs + queue_obs + loss_obs + lat_obs
+                if (o.metric_name == "link_utilization_pct" and o.value >= high_thresh)
+                or (o.metric_name == "queue_drops" and o.value > 0)
+                or (o.metric_name == "packet_loss_pct" and o.value >= loss_thresh)
+                or (o.metric_name == "latency_ms" and o.value >= float(self.rules.get("latency_ms_warning", 100.0)))
+            ]
+            evidence_ids = list(dict.fromkeys(o.observation_id for o in transient_evidence))
+            if not evidence_ids:
+                return
+            findings.append(
+                Finding(
+                    finding_id=generate_id("F-PERF"), incident_id=incident_id,
+                    source_tower=TowerId.PERFORMANCE, producer="performance.detect_congestion",
+                    finding_type="congestion_candidate", severity=Severity.LOW,
+                    status=FindingStatus.ACTIVE, entity_refs=[entity_id], evidence_refs=evidence_ids,
+                    confidence=0.35, independence_group=f"telemetry:link_utilization:{entity_id}",
+                    observed_at=util_obs[-1].timestamp, created_at=datetime.now(timezone.utc),
+                    description=(f"Transient congestion-like spike on {entity_id}: "
+                                 f"{len(qualifying_times)} correlated sample(s); "
+                                 f"{min_persistent_samples} required for diagnosis."),
+                    metadata={"qualifying_samples": len(qualifying_times), "observed_samples": len(util_obs)},
+                )
+            )
 
         elif is_elevated_util and not has_pressure:
             # High utilization alone is a capacity warning, NOT high-severity congestion
@@ -250,12 +322,39 @@ class PerformanceEngine:
         worst_snr = min([o.value for o in snr_obs], default=100.0)
 
         if (rssi_obs and worst_rssi <= rssi_crit) or (snr_obs and worst_snr <= snr_crit):
-            evidence_obs = rssi_obs + snr_obs + loss_obs + tp_obs
-            evidence_ids = list(dict.fromkeys([o.observation_id for o in evidence_obs]))
+            bad_times = {
+                o.timestamp for o in rssi_obs if o.value <= rssi_crit
+            } | {o.timestamp for o in snr_obs if o.value <= snr_crit}
+            evidence_obs = [
+                o for o in rssi_obs + snr_obs + loss_obs + tp_obs
+                if o.timestamp in bad_times
+                and ((o.metric_name == "rssi_dbm" and o.value <= rssi_crit)
+                     or (o.metric_name == "snr_db" and o.value <= snr_crit)
+                     or (o.metric_name not in ("rssi_dbm", "snr_db") and o.value > 0))
+            ]
+            evidence_ids = list(dict.fromkeys(o.observation_id for o in evidence_obs))
+
+            min_persistent_samples = int(self.rules.get("min_persistent_samples", 2))
+            single_snapshot = len({o.timestamp for o in rssi_obs + snr_obs}) == 1
+            if len(bad_times) < min_persistent_samples and not single_snapshot:
+                findings.append(
+                    Finding(
+                        finding_id=generate_id("F-PERF"), incident_id=incident_id,
+                        source_tower=TowerId.PERFORMANCE, producer="performance.detect_weak_wifi",
+                        finding_type="weak_wifi_signal", severity=Severity.LOW,
+                        status=FindingStatus.ACTIVE, entity_refs=[entity_id], evidence_refs=evidence_ids,
+                        confidence=0.35, independence_group=f"telemetry:wifi:{entity_id}",
+                        observed_at=(rssi_obs[-1] if rssi_obs else snr_obs[-1]).timestamp,
+                        created_at=datetime.now(timezone.utc),
+                        description=f"Transient poor signal reading on {entity_id}; persistence not established.",
+                        metadata={"qualifying_samples": len(bad_times)},
+                    )
+                )
+                return
 
             sev = Severity.HIGH if (worst_rssi <= rssi_crit and worst_snr <= snr_crit) else Severity.MEDIUM
-            conf = 0.86 if sev == Severity.HIGH else 0.72
-            conf_cat = ConfidenceCategory.HIGH if sev == Severity.HIGH else ConfidenceCategory.MODERATE
+            conf = 0.86 if sev == Severity.HIGH and len(bad_times) >= 3 else 0.45
+            conf_cat = ConfidenceCategory.HIGH if conf >= 0.8 else ConfidenceCategory.LOW
 
             f_id = generate_id("F-PERF")
             now = datetime.now(timezone.utc)
@@ -277,7 +376,9 @@ class PerformanceEngine:
                     f"Degraded wireless signal quality on {entity_id}: lowest RSSI {worst_rssi:.1f} dBm, "
                     f"lowest SNR {worst_snr:.1f} dB."
                 ),
-                metadata={"worst_rssi_dbm": worst_rssi, "worst_snr_db": worst_snr},
+                metadata={"worst_rssi_dbm": worst_rssi, "worst_snr_db": worst_snr,
+                          "qualifying_samples": len(bad_times),
+                          "observed_samples": len({o.timestamp for o in rssi_obs + snr_obs})},
             )
             findings.append(finding)
 
@@ -399,13 +500,19 @@ class PerformanceTower:
     def execute_task(self, task: InvestigationTask) -> TaskResult:
         """Executes a supervisor-authorized investigation task."""
         now = datetime.now(timezone.utc)
+        result, finding_refs, evidence_refs, warnings = investigate_with_engine(
+            self.engine, self.repo, task
+        )
         return TaskResult(
             result_id=generate_id("RES-PERF"),
             task_id=task.task_id,
             assignee=self.tower_id,
             status=TaskStatus.COMPLETED,
             result_schema=task.expected_result_schema,
-            result={"analysis": "Task executed by performance tower"},
+            result=result,
+            finding_refs=finding_refs,
+            evidence_refs=evidence_refs,
+            warnings=warnings,
             completed_at=now,
         )
 

@@ -1,6 +1,6 @@
 """Unit tests for the Performance Diagnostic Tower and Engine."""
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from netcoop.communication.queries import PeerQuery
 from netcoop.communication.tasks import InvestigationTask
@@ -77,8 +77,27 @@ def test_link_congestion_detected(sample_utc_time):
 
     assert len(hypotheses) == 1
     assert hypotheses[0].fault_code == "LINK_CONGESTION"
-    assert hypotheses[0].confidence_category == ConfidenceCategory.HIGH
+    # A single complete snapshot is actionable, but cannot establish persistence.
+    assert hypotheses[0].confidence_category == ConfidenceCategory.LOW
     assert "SW_CORE:Gi0/2" in hypotheses[0].suspected_entities
+
+
+def test_single_congestion_spike_in_a_series_is_not_diagnosed(sample_utc_time):
+    observations = []
+    for step in range(5):
+        ts = sample_utc_time + timedelta(seconds=30 * step)
+        spike = step == 4
+        observations.extend([
+            make_metric(f"U{step}", "SW_CORE:Gi0/2", "link_utilization_pct", 96.0 if spike else 35.0, "percent", ts),
+            make_metric(f"Q{step}", "SW_CORE:Gi0/2", "queue_drops", 250.0 if spike else 0.0, "count", ts),
+            make_metric(f"L{step}", "SW_CORE:Gi0/2", "latency_ms", 250.0 if spike else 8.0, "milliseconds", ts),
+            make_metric(f"P{step}", "SW_CORE:Gi0/2", "packet_loss_pct", 2.0 if spike else 0.0, "percent", ts),
+        ])
+
+    findings, hypotheses = PerformanceEngine().analyze("INC-SPIKE", observations)
+    assert not hypotheses
+    assert len(findings) == 1
+    assert findings[0].severity == Severity.LOW
 
 
 def test_high_utilization_alone_does_not_trigger_congestion_hypothesis(sample_utc_time):

@@ -30,6 +30,7 @@ from netcoop.models.observations import (
 )
 from netcoop.models.reports import TowerReport
 from netcoop.storage.sqlite import SQLiteRepository
+from netcoop.towers.base import investigate_with_engine
 from netcoop.towers.rules import load_rules
 from netcoop.utils.id_generator import generate_id
 
@@ -98,7 +99,11 @@ class InfrastructureEngine:
         is_warning = max_cpu >= cpu_warn or max_mem >= float(self.rules.get("memory_warning_pct", 80.0))
 
         if is_overload:
-            evidence_obs = cpu_obs + mem_obs
+            evidence_obs = [
+                o for o in cpu_obs + mem_obs
+                if (o.metric_name == "cpu_utilization_pct" and o.value >= cpu_crit)
+                or (o.metric_name == "memory_utilization_pct" and o.value >= mem_crit)
+            ]
             evidence_ids = list(dict.fromkeys([o.observation_id for o in evidence_obs]))
 
             sev = Severity.CRITICAL if (max_cpu >= 95.0 or max_mem >= 95.0) else Severity.HIGH
@@ -186,7 +191,7 @@ class InfrastructureEngine:
         max_flaps = max([o.value for o in flap_obs], default=0.0)
 
         if max_err >= err_warn or max_flaps >= 1:
-            evidence_obs = err_obs + flap_obs
+            evidence_obs = [o for o in err_obs + flap_obs if o.value > 0]
             evidence_ids = list(dict.fromkeys([o.observation_id for o in evidence_obs]))
 
             sev = Severity.HIGH if (max_err >= err_crit or max_flaps >= 2) else Severity.MEDIUM
@@ -383,13 +388,19 @@ class InfrastructureTower:
     def execute_task(self, task: InvestigationTask) -> TaskResult:
         """Executes a supervisor-authorized investigation task."""
         now = datetime.now(timezone.utc)
+        result, finding_refs, evidence_refs, warnings = investigate_with_engine(
+            self.engine, self.repo, task
+        )
         return TaskResult(
             result_id=generate_id("RES-INFRA"),
             task_id=task.task_id,
             assignee=self.tower_id,
             status=TaskStatus.COMPLETED,
             result_schema=task.expected_result_schema,
-            result={"analysis": "Task executed by infrastructure tower"},
+            result=result,
+            finding_refs=finding_refs,
+            evidence_refs=evidence_refs,
+            warnings=warnings,
             completed_at=now,
         )
 

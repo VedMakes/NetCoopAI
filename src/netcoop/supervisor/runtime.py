@@ -7,11 +7,17 @@ tower execution, RCA reasoning, task budgeting, and evidence gate verification.
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from netcoop.communication.fabric import IntegrationFabric
-from netcoop.models.enums import ProposalDecision, TowerId
-from netcoop.models.reports import FinalReport, TowerReport
+from netcoop.communication.queries import PeerQuery
+from netcoop.communication.tasks import DiagnosticTaskArtifact
+from netcoop.models.enums import ConfidenceCategory, ProposalDecision, TowerId
+from netcoop.models.findings import Finding
+from netcoop.models.hypotheses import Hypothesis
+from netcoop.models.observations import TopologyObservation
+from netcoop.models.reports import ClaimEvidenceManifest, FinalReport, TowerReport
 from netcoop.supervisor.agent import SupervisoryRCAAgent
 from netcoop.supervisor.gate import EvidenceReleaseGate
 from netcoop.supervisor.models import (
@@ -20,6 +26,7 @@ from netcoop.supervisor.models import (
     IncidentLifecycleState,
     InvestigationBudget,
 )
+from netcoop.utils.id_generator import generate_id
 
 if TYPE_CHECKING:
     from netcoop.models.observations import CanonicalObservation
@@ -46,12 +53,14 @@ class SupervisorRuntime:
         rca_agent: SupervisoryRCAAgent | None = None,
         gate: EvidenceReleaseGate | None = None,
         budget: InvestigationBudget | None = None,
+        network_profile: dict[str, str] | None = None,
     ) -> None:
         self.repo = repository
         self.fabric = fabric or IntegrationFabric(repository=self.repo)
         self.gate = gate or EvidenceReleaseGate(repository=self.repo)
         self.rca_agent = rca_agent or SupervisoryRCAAgent()
         self.budget = budget or InvestigationBudget()
+        self.network_profile = network_profile
 
         # Operational state
         self.state = IncidentLifecycleState.CREATED
@@ -73,6 +82,7 @@ class SupervisorRuntime:
         observations: list[CanonicalObservation],
         symptom: str = "",
         time_window: dict[str, Any] | None = None,
+        data_quality_warnings: list[str] | None = None,
     ) -> FinalReport:
         """Runs full end-to-end incident investigation workflow deterministically."""
         # Step 1: Initialize incident record
@@ -104,7 +114,13 @@ class SupervisorRuntime:
             time_window=time_window,
             tower_reports=tower_reports,
             observations=observations,
+            data_quality_warnings=data_quality_warnings or [],
         )
+
+        # Services asks Connectivity to verify the physical path to a resolver/relay
+        # when a service fault is present. Keep the request and response in the dossier
+        # so the supervisor can use and disclose the result.
+        self._run_service_reachability_queries(dossier, observations)
 
         # Step 4: Supervisory reasoning loop
         self.state = IncidentLifecycleState.SUPERVISOR_REASONING
@@ -114,6 +130,8 @@ class SupervisorRuntime:
         # Step 5: Handle investigation requests if budget allows
         if proposal.decision == ProposalDecision.REQUEST_EVIDENCE:
             if (
+                self.supervisor_calls < self.budget.max_supervisor_calls
+                and
                 self.investigation_rounds < self.budget.max_investigation_rounds
                 and self.tasks_dispatched < self.budget.max_tasks
             ):
@@ -139,21 +157,55 @@ class SupervisorRuntime:
                         task_res = self.fabric.dispatch_task(task.task_id)
                         self.tasks_dispatched += 1
 
-                        dossier.task_history.append(
-                            {
-                                "task_id": task.task_id,
-                                "assignee": task.assignee,
-                                "capability": task.capability,
-                                "status": task_res.status.value,
-                                "result": task_res.result,
-                            }
-                        )
+                        history_entry: dict[str, Any] = {
+                            "task_id": task.task_id,
+                            "assignee": task.assignee.value,
+                            "capability": task.capability,
+                            "status": task_res.status.value,
+                            "result_schema": task_res.result_schema,
+                            "result": task_res.result,
+                            "finding_refs": task_res.finding_refs,
+                            "evidence_refs": task_res.evidence_refs,
+                            "warnings": task_res.warnings,
+                            "limitations": task_res.limitations,
+                        }
+                        if task_res.result_schema != task.expected_result_schema:
+                            history_entry["warnings"].append(
+                                f"Result schema mismatch: expected {task.expected_result_schema}, got {task_res.result_schema}."
+                            )
+                        elif task_res.status.value == "COMPLETED" and task_res.result:
+                            self._merge_task_artifact(
+                                dossier,
+                                task_res.result,
+                                history_entry,
+                                task_res.finding_refs,
+                                task_res.evidence_refs,
+                                {obs.observation_id for obs in observations},
+                            )
+                        dossier.task_history.append(history_entry)
 
                 # Re-diagnose with updated task history in round 2
                 dossier.investigation_round += 1
                 self.state = IncidentLifecycleState.SUPERVISOR_REASONING
                 proposal, manifest = self.rca_agent.diagnose(dossier)
                 self.supervisor_calls += 1
+            else:
+                proposal = proposal.model_copy(update={
+                    "decision": ProposalDecision.ABSTAIN,
+                    "suspected_root_cause": None,
+                    "confidence_category": ConfidenceCategory.INSUFFICIENT,
+                    "recommended_actions": ["Collect the requested discriminating telemetry and rerun diagnosis."],
+                    "abstain_reason": "Investigation could not be completed within the configured orchestration budget.",
+                    "requested_tasks": [],
+                })
+                manifest = ClaimEvidenceManifest(
+                    incident_id=incident_id,
+                    claim="Abstained because the conflict investigation budget was exhausted.",
+                    claimed_entities=proposal.affected_entities,
+                    finding_ids=[], observation_ids=[], independence_groups=[],
+                    contradiction_ids=proposal.alternative_causes,
+                    contradiction_disclosures=[],
+                )
 
         # Step 6: Evidence and Release Gate verification
         self.state = IncidentLifecycleState.PROPOSED
@@ -164,6 +216,20 @@ class SupervisorRuntime:
             f"{h.fault_code}: {h.suspected_entities}"
             for h in dossier.hypotheses
         ]
+        orchestration_warnings = [
+            f"Task {entry.get('task_id')} ({entry.get('capability')}) {entry.get('status')}: {warning}"
+            for entry in dossier.task_history
+            for warning in entry.get("warnings", []) + entry.get("limitations", [])
+        ]
+        orchestration_warnings.extend(
+            f"Task {entry.get('task_id')} ({entry.get('capability')}) ended {entry.get('status')}."
+            for entry in dossier.task_history if entry.get("status") != "COMPLETED"
+        )
+        orchestration_warnings.extend(
+            f"Peer query {entry.get('query_id')} ({entry.get('capability')}) {entry.get('status')}: {warning}"
+            for entry in dossier.peer_query_history
+            for warning in entry.get("warnings", [])
+        )
 
         gate_result = self.gate.evaluate(
             proposal=proposal,
@@ -172,6 +238,10 @@ class SupervisorRuntime:
             known_observations=observations,
             known_findings=dossier.findings,
             competing_hypotheses=competing_hypotheses,
+            data_quality_warnings=data_quality_warnings,
+            orchestration_warnings=orchestration_warnings,
+            peer_interactions=dossier.peer_query_history,
+            network_profile=self.network_profile,
         )
 
         # Persist proposal and gate result
@@ -223,6 +293,7 @@ class SupervisorRuntime:
         time_window: dict[str, Any] | None,
         tower_reports: dict[TowerId, TowerReport],
         observations: list[CanonicalObservation],
+        data_quality_warnings: list[str] | None = None,
     ) -> IncidentDossier:
         """Constructs a compact structured dossier minimizing context for RCA."""
         all_findings = []
@@ -248,10 +319,157 @@ class SupervisorRuntime:
             tower_reports=tower_reports,
             findings=all_findings,
             hypotheses=all_hypotheses,
-            topology_summary={},
+            topology_summary={
+                "relationships": [
+                    {
+                        "source": obs.source_entity,
+                        "target": obs.target_entity,
+                        "type": obs.relationship_type,
+                        "interface": obs.interface_name,
+                    }
+                    for obs in observations if isinstance(obs, TopologyObservation)
+                ]
+            },
             conflicts=[],
             investigation_round=1,
             task_history=[],
+            peer_query_history=[],
             available_capabilities=available_caps,
-            data_quality_warnings=[],
+            data_quality_warnings=data_quality_warnings or [],
         )
+
+    def _run_service_reachability_queries(
+        self, dossier: IncidentDossier, observations: list[CanonicalObservation]
+    ) -> None:
+        dependency_faults = {"dns": "DNS_FAILURE", "dhcp": "DHCP_FAILURE"}
+        fault_codes = {hyp.fault_code for hyp in dossier.hypotheses}
+        dependencies = sorted({
+            (obs.relationship_type.casefold(), obs.source_entity, obs.target_entity)
+            for obs in observations
+            if isinstance(obs, TopologyObservation)
+            and obs.relationship_type.casefold() in dependency_faults
+            and dependency_faults[obs.relationship_type.casefold()] in fault_codes
+        })
+        max_queries = 8
+        for dependency_type, consumer, provider in dependencies[:max_queries]:
+            query = PeerQuery(
+                query_id=generate_id("QRY"),
+                incident_id=dossier.incident_id,
+                requester="services",
+                recipient="connectivity",
+                capability="connectivity.trace_path",
+                scope=[consumer, provider],
+                expected_schema="netcoop://schemas/capabilities/connectivity-trace-path-output/1.0",
+                created_at=datetime.now(timezone.utc),
+            )
+            result = self.fabric.query_peer(query)
+            dossier.peer_query_history.append({
+                "query_id": query.query_id,
+                "requester": query.requester,
+                "recipient": query.recipient,
+                "capability": query.capability,
+                "scope": query.scope,
+                "status": result.status.value,
+                "result": result.result,
+                "evidence_refs": result.evidence_refs,
+                "warnings": result.warnings,
+            })
+        if len(dependencies) > max_queries:
+            dossier.peer_query_history.append({
+                "requester": "services",
+                "recipient": "connectivity",
+                "capability": "connectivity.trace_path",
+                "status": "skipped",
+                "scope": [],
+                "result": None,
+                "evidence_refs": [],
+                "warnings": [
+                    f"Reached the limit of {max_queries} service reachability queries; "
+                    f"{len(dependencies) - max_queries} declared dependencies were not queried."
+                ],
+            })
+
+    @staticmethod
+    def _merge_task_artifact(
+        dossier: IncidentDossier,
+        artifact: dict[str, Any],
+        history_entry: dict[str, Any],
+        declared_finding_refs: list[str],
+        declared_evidence_refs: list[str],
+        known_observation_ids: set[str],
+    ) -> None:
+        """Validate specialist findings before adding them to supervisor context."""
+        try:
+            artifact = DiagnosticTaskArtifact.model_validate(artifact).model_dump()
+            parsed_findings = [Finding.model_validate(raw) for raw in artifact.get("findings", [])]
+            parsed_hypotheses = [Hypothesis.model_validate(raw) for raw in artifact.get("hypotheses", [])]
+            actual_finding_refs = {finding.finding_id for finding in parsed_findings}
+            finding_evidence_refs = {
+                ref for finding in parsed_findings for ref in finding.evidence_refs
+            }
+            actual_evidence_refs = set(artifact.get("evidence_refs", []))
+            if actual_finding_refs != set(declared_finding_refs) or actual_finding_refs != set(artifact.get("finding_refs", [])):
+                raise ValueError("Task finding references do not match the returned finding artifacts.")
+            if actual_evidence_refs != set(declared_evidence_refs):
+                raise ValueError("Task evidence references do not match the TaskResult envelope.")
+            unknown_observations = (actual_evidence_refs | finding_evidence_refs) - known_observation_ids
+            if unknown_observations:
+                raise ValueError(f"Task findings cite unknown observations: {sorted(unknown_observations)}")
+
+            existing_finding_ids = {finding.finding_id for finding in dossier.findings}
+            task_finding_ids = actual_finding_refs | existing_finding_ids
+            for finding in parsed_findings:
+                if finding.incident_id != dossier.incident_id:
+                    raise ValueError(f"Finding {finding.finding_id} belongs to another incident.")
+            for hypothesis in parsed_hypotheses:
+                if hypothesis.incident_id != dossier.incident_id:
+                    raise ValueError(f"Hypothesis {hypothesis.hypothesis_id} belongs to another incident.")
+                missing_findings = set(hypothesis.supporting_finding_refs) - task_finding_ids
+                if missing_findings:
+                    raise ValueError(f"Hypothesis {hypothesis.hypothesis_id} cites unknown findings: {sorted(missing_findings)}")
+        except Exception as exc:
+            history_entry["warnings"].append(f"Task artifact validation failed: {exc}")
+            return
+
+        finding_by_key = {
+            (finding.source_tower, finding.finding_type, tuple(finding.entity_refs)): finding
+            for finding in dossier.findings
+        }
+        finding_ids = {finding.finding_id for finding in dossier.findings}
+        finding_id_remap: dict[str, str] = {}
+        accepted_findings = 0
+        for finding in parsed_findings:
+            key = (finding.source_tower, finding.finding_type, tuple(finding.entity_refs))
+            existing = finding_by_key.get(key)
+            if existing is not None:
+                finding_id_remap[finding.finding_id] = existing.finding_id
+            elif finding.finding_id not in finding_ids:
+                dossier.findings.append(finding)
+                finding_by_key[key] = finding
+                finding_ids.add(finding.finding_id)
+                finding_id_remap[finding.finding_id] = finding.finding_id
+                accepted_findings += 1
+
+        hypothesis_by_key = {
+            (hypothesis.fault_code, tuple(hypothesis.suspected_entities)): hypothesis
+            for hypothesis in dossier.hypotheses
+        }
+        hypothesis_ids = {hypothesis.hypothesis_id for hypothesis in dossier.hypotheses}
+        accepted_hypotheses = 0
+        for hypothesis in parsed_hypotheses:
+            key = (hypothesis.fault_code, tuple(hypothesis.suspected_entities))
+            if key in hypothesis_by_key or hypothesis.hypothesis_id in hypothesis_ids:
+                continue
+            mapped_refs = [finding_id_remap.get(ref, ref) for ref in hypothesis.supporting_finding_refs]
+            if not set(mapped_refs).issubset(finding_ids):
+                history_entry["warnings"].append(
+                    f"Task hypothesis {hypothesis.hypothesis_id} was omitted because its finding references were not merged."
+                )
+                continue
+            hypothesis = hypothesis.model_copy(update={"supporting_finding_refs": mapped_refs})
+            dossier.hypotheses.append(hypothesis)
+            hypothesis_by_key[key] = hypothesis
+            hypothesis_ids.add(hypothesis.hypothesis_id)
+            accepted_hypotheses += 1
+        history_entry["accepted_findings"] = accepted_findings
+        history_entry["accepted_hypotheses"] = accepted_hypotheses

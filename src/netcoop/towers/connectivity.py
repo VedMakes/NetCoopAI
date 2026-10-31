@@ -37,11 +37,25 @@ from netcoop.utils.id_generator import generate_id
 
 
 class TopologyGraph:
-    """Manages an in-memory NetworkX topology graph for campus connectivity."""
+    """Manages an in-memory topology graph with parallel links and profile anchors."""
 
-    def __init__(self) -> None:
-        self.graph: nx.Graph = nx.Graph()
-        self.observation_map: dict[tuple[str, str], str] = {}  # (u, v) -> observation_id
+    def __init__(
+        self,
+        anchor_entities: list[str] | None = None,
+        logical_relationships: list[str] | None = None,
+        topology_completeness: str | None = None,
+    ) -> None:
+        self.graph: nx.MultiGraph = nx.MultiGraph()
+        if anchor_entities is None:
+            anchor_entities = load_rules().get("connectivity", {}).get("topology_anchors", [])
+        self.anchor_entities = list(anchor_entities)
+        if logical_relationships is None:
+            logical_relationships = load_rules().get("connectivity", {}).get("logical_relationships", [])
+        self.logical_relationships = {item.casefold() for item in logical_relationships}
+        if topology_completeness is None:
+            topology_completeness = load_rules().get("connectivity", {}).get("topology_completeness", "unknown")
+        self.topology_completeness = topology_completeness
+        self.observation_map: dict[tuple[str, str, str], str] = {}
 
     def add_node(self, node_id: str, **attrs: Any) -> None:
         self.graph.add_node(node_id, **attrs)
@@ -56,9 +70,11 @@ class TopologyGraph:
         observation_id: str | None = None,
         **extra: Any,
     ) -> None:
+        edge_key = observation_id or f"{source}:{target}:{self.graph.number_of_edges(source, target)}"
         self.graph.add_edge(
             source,
             target,
+            key=edge_key,
             relationship=relationship,
             link_speed_mbps=speed_mbps,
             interface_name=interface_name,
@@ -66,13 +82,17 @@ class TopologyGraph:
             **extra,
         )
         if observation_id:
-            self.observation_map[(source, target)] = observation_id
-            self.observation_map[(target, source)] = observation_id
+            self.observation_map[(source, target, edge_key)] = observation_id
+            self.observation_map[(target, source, edge_key)] = observation_id
 
     def build_from_observations(self, observations: list[CanonicalObservation]) -> None:
         """Constructs graph from canonical TopologyObservations."""
         for obs in observations:
             if isinstance(obs, TopologyObservation):
+                # Service dependencies and logical uplink declarations support
+                # impact inference, but must not fabricate a physical path.
+                if obs.relationship_type.casefold() in self.logical_relationships:
+                    continue
                 self.add_node(obs.source_entity)
                 self.add_node(obs.target_entity)
                 self.add_link(
@@ -88,6 +108,16 @@ class TopologyGraph:
         """Calculates topological path between two entities without fabricating missing links."""
         if source not in self.graph or target not in self.graph:
             missing = [e for e in (source, target) if e not in self.graph]
+            if self.topology_completeness != "complete":
+                return {
+                    "reachable": None,
+                    "path": [],
+                    "hops": -1,
+                    "warning": (
+                        f"Entity/entities not observed in {self.topology_completeness} topology: {missing}. "
+                        "Reachability is unknown."
+                    ),
+                }
             return {
                 "reachable": False,
                 "path": [],
@@ -100,16 +130,21 @@ class TopologyGraph:
             links = []
             obs_ids = []
             for i in range(len(path) - 1):
-                edge_data = self.graph.get_edge_data(path[i], path[i + 1]) or {}
+                parallel = self.graph.get_edge_data(path[i], path[i + 1]) or {}
+                _, edge_data = min(parallel.items(), key=lambda item: str(item[0]))
                 links.append({
                     "from": path[i],
                     "to": path[i + 1],
                     "interface": edge_data.get("interface_name"),
                     "speed_mbps": edge_data.get("link_speed_mbps"),
+                    "link_id": edge_data.get("observation_id"),
+                    "parallel_link_count": len(parallel),
                 })
-                obs_id = edge_data.get("observation_id")
-                if obs_id:
-                    obs_ids.append(obs_id)
+                obs_ids.extend(
+                    data["observation_id"]
+                    for data in parallel.values()
+                    if data.get("observation_id")
+                )
 
             return {
                 "reachable": True,
@@ -119,12 +154,15 @@ class TopologyGraph:
                 "evidence_refs": obs_ids,
             }
 
-        return {
-            "reachable": False,
-            "path": [],
-            "hops": -1,
-            "warning": f"No topological path connects '{source}' and '{target}'.",
-        }
+        if self.topology_completeness != "complete":
+            return {
+                "reachable": None,
+                "path": [],
+                "hops": -1,
+                "warning": f"No path observed in {self.topology_completeness} topology; reachability is unknown.",
+            }
+        return {"reachable": False, "path": [], "hops": -1,
+                "warning": f"No topological path connects '{source}' and '{target}'."}
 
     def query_neighbors(self, entity_id: str) -> list[dict[str, Any]]:
         """Returns adjacent entities and link parameters."""
@@ -133,20 +171,22 @@ class TopologyGraph:
 
         neighbors: list[dict[str, Any]] = []
         for nbr in self.graph.neighbors(entity_id):
-            edge_data = self.graph.get_edge_data(entity_id, nbr) or {}
-            neighbors.append({
-                "neighbor_id": nbr,
-                "relationship": edge_data.get("relationship", "connected_to"),
-                "speed_mbps": edge_data.get("link_speed_mbps"),
-                "interface_name": edge_data.get("interface_name"),
-                "observation_id": edge_data.get("observation_id"),
-            })
+            parallel = self.graph.get_edge_data(entity_id, nbr) or {}
+            for edge_key, edge_data in sorted(parallel.items(), key=lambda item: str(item[0])):
+                neighbors.append({
+                    "neighbor_id": nbr,
+                    "relationship": edge_data.get("relationship", "connected_to"),
+                    "speed_mbps": edge_data.get("link_speed_mbps"),
+                    "interface_name": edge_data.get("interface_name"),
+                    "observation_id": edge_data.get("observation_id"),
+                    "link_key": edge_key,
+                })
         return neighbors
 
     def find_common_uplink(
         self,
         entities: list[str],
-        core_targets: tuple[str, ...] = ("GW_EDGE_01", "SW_CORE_01"),
+        core_targets: tuple[str, ...] | None = None,
     ) -> dict[str, Any]:
         """Finds shared upstream dependency (e.g. common distribution or core switch) for affected entities."""
         valid_entities = [e for e in entities if e in self.graph]
@@ -157,10 +197,20 @@ class TopologyGraph:
                 "reason": "At least two valid entities are required to determine a common upstream dependency.",
             }
 
-        target = next((c for c in core_targets if c in self.graph), None)
+        configured_anchors = list(core_targets) if core_targets is not None else self.anchor_entities
+        target = next((c for c in configured_anchors if c in self.graph), None)
         if not target:
-            # Fallback to node with highest degree
-            target = max(self.graph.nodes, key=lambda n: self.graph.degree(n))
+            return {
+                "common_uplink": None,
+                "uplinks": [],
+                "reason": "No configured topology anchor is present; cannot infer an upstream direction.",
+            }
+        if self.topology_completeness != "complete":
+            return {
+                "common_uplink": None,
+                "uplinks": [],
+                "reason": f"Topology is {self.topology_completeness}; upstream inference requires complete topology.",
+            }
 
         upstream_paths: dict[str, list[str]] = {}
         for entity in valid_entities:
@@ -198,7 +248,7 @@ class TopologyGraph:
         }
 
     def analyze_blast_radius(
-        self, failed_entity: str, backbone_entity: str = "SW_CORE_01"
+        self, failed_entity: str, backbone_entity: str | None = None
     ) -> dict[str, Any]:
         """Calculates which entities lose reachability to the backbone if failed_entity is disconnected."""
         if failed_entity not in self.graph:
@@ -209,10 +259,22 @@ class TopologyGraph:
                 "warning": f"Entity '{failed_entity}' not in topology graph.",
             }
 
-        target = backbone_entity if backbone_entity in self.graph else None
+        candidates = [backbone_entity] if backbone_entity else self.anchor_entities
+        target = next((entity for entity in candidates if entity in self.graph), None)
         if not target:
-            # Pick highest degree node as representative backbone
-            target = max(self.graph.nodes, key=lambda n: self.graph.degree(n))
+            return {
+                "failed_entity": failed_entity,
+                "isolated_entities": [],
+                "total_isolated": 0,
+                "warning": "No configured topology anchor is present; blast radius is unknown.",
+            }
+        if self.topology_completeness != "complete":
+            return {
+                "failed_entity": failed_entity,
+                "isolated_entities": [],
+                "total_isolated": 0,
+                "warning": f"Topology is {self.topology_completeness}; blast radius is unknown.",
+            }
 
         if failed_entity == target:
             isolated = [n for n in self.graph.nodes if n != target]
@@ -256,7 +318,18 @@ class ConnectivityEngine:
         findings: list[Finding] = []
         hypotheses: list[Hypothesis] = []
 
-        topo = topology or TopologyGraph()
+        topo = topology or TopologyGraph(
+            anchor_entities=self.rules.get("topology_anchors"),
+            logical_relationships=self.rules.get("logical_relationships"),
+            topology_completeness=self.rules.get("topology_completeness"),
+        )
+        topo.anchor_entities = list(self.rules.get("topology_anchors", topo.anchor_entities))
+        topo.logical_relationships = {
+            item.casefold() for item in self.rules.get("logical_relationships", topo.logical_relationships)
+        }
+        topo.topology_completeness = self.rules.get(
+            "topology_completeness", topo.topology_completeness
+        )
         topo.build_from_observations(observations)
 
         if topo.graph.number_of_nodes() == 0:
@@ -266,7 +339,7 @@ class ConnectivityEngine:
 
         # 1. Check for disconnected components in topology
         connected_components = list(nx.connected_components(topo.graph))
-        if len(connected_components) > 1:
+        if len(connected_components) > 1 and topo.topology_completeness == "complete":
             # Partitioned network topology detected
             evidence_obs = [
                 o.observation_id
@@ -368,7 +441,11 @@ class ConnectivityTower:
         self.repository = repository
         self.rules = rules or load_rules()
         self.engine = ConnectivityEngine(self.rules)
-        self.topology = topology_graph or TopologyGraph()
+        self.topology = topology_graph or TopologyGraph(
+            anchor_entities=self.engine.rules.get("topology_anchors"),
+            logical_relationships=self.engine.rules.get("logical_relationships"),
+            topology_completeness=self.engine.rules.get("topology_completeness"),
+        )
 
     def get_capabilities(self) -> list[TowerCapability]:
         profile = CapabilityRegistry.get_profile(self.tower_id)
@@ -491,30 +568,56 @@ class ConnectivityTower:
         now = datetime.now(timezone.utc)
         cap = task.capability
 
+        targets = task.objective.get("target_entities") or task.objective.get("scope") or task.constraints.get("scope", [])
         if cap in ("INVESTIGATE_TOPOLOGY", "ANALYZE_REACHABILITY"):
-            scope = task.constraints.get("scope", [])
-            src = scope[0] if len(scope) > 0 else "SW_CORE_01"
-            dst = scope[1] if len(scope) > 1 else "GW_EDGE_01"
-            res = self.topology.trace_path(src, dst)
-
+            if len(targets) >= 2:
+                res = self.topology.trace_path(targets[0], targets[1])
+            elif len(targets) == 1:
+                res = self.topology.analyze_blast_radius(targets[0])
+            else:
+                return TaskResult(
+                    result_id=generate_id("RES-CONN"), task_id=task.task_id,
+                    assignee=self.tower_id, status=TaskStatus.FAILED,
+                    result_schema=task.expected_result_schema,
+                    warnings=["Reachability investigation requires target entities; refusing an unrelated default path."],
+                    completed_at=now,
+                )
+        elif cap == "connectivity.inspect_common_upstream":
+            if len(targets) < 2:
+                return TaskResult(
+                    result_id=generate_id("RES-CONN"), task_id=task.task_id,
+                    assignee=self.tower_id, status=TaskStatus.FAILED,
+                    result_schema=task.expected_result_schema,
+                    warnings=["Common-uplink investigation requires at least two target entities."],
+                    completed_at=now,
+                )
+            res = self.topology.find_common_uplink(targets)
+        else:
             return TaskResult(
-                result_id=generate_id("RES-CONN"),
-                task_id=task.task_id,
-                assignee=self.tower_id,
-                status=TaskStatus.COMPLETED,
-                result_schema="netcoop://schemas/tasks/connectivity-reachability-result/1.0",
-                result=res,
-                evidence_refs=res.get("evidence_refs", []),
-                completed_at=now,
+                result_id=generate_id("RES-CONN"), task_id=task.task_id,
+                assignee=self.tower_id, status=TaskStatus.FAILED,
+                result_schema=task.expected_result_schema,
+                warnings=[f"Unsupported capability: {cap}"], completed_at=now,
             )
 
         return TaskResult(
             result_id=generate_id("RES-CONN"),
             task_id=task.task_id,
             assignee=self.tower_id,
-            status=TaskStatus.FAILED,
-            result_schema="netcoop://schemas/tasks/error-result/1.0",
-            warnings=[f"Unsupported capability: {cap}"],
+            status=TaskStatus.COMPLETED,
+            result_schema=task.expected_result_schema,
+            result={
+                "incident_id": task.incident_id,
+                "capability": cap,
+                "target_entities": targets,
+                "findings": [],
+                "hypotheses": [],
+                "finding_refs": [],
+                "evidence_refs": res.get("evidence_refs", []),
+                "analysis": res,
+                "summary": "Topology investigation completed for requested entities.",
+            },
+            evidence_refs=res.get("evidence_refs", []),
             completed_at=now,
         )
 

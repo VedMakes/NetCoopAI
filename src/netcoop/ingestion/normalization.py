@@ -191,6 +191,7 @@ def normalize_metric_value_and_unit(
             pass
         else:
             warnings.append(f"Unrecognized unit '{norm_unit}' for percent metric '{canonical_metric}'.")
+            return None, None, warnings
 
     elif target_unit == "milliseconds":
         if norm_unit in ("ms", "milliseconds", "msec"):
@@ -205,6 +206,7 @@ def normalize_metric_value_and_unit(
             pass
         else:
             warnings.append(f"Unrecognized unit '{norm_unit}' for millisecond metric '{canonical_metric}'.")
+            return None, None, warnings
 
     elif target_unit == "mbps":
         if norm_unit in ("mbps", "mb/s", "megabits/sec"):
@@ -225,6 +227,7 @@ def normalize_metric_value_and_unit(
             pass
         else:
             warnings.append(f"Unrecognized unit '{norm_unit}' for bandwidth metric '{canonical_metric}'.")
+            return None, None, warnings
 
     elif target_unit == "count":
         if norm_unit in ("count", "packets", "drops", "errors", "flaps", "pkts", "frames"):
@@ -233,8 +236,13 @@ def normalize_metric_value_and_unit(
             pass
         else:
             warnings.append(f"Unrecognized unit '{norm_unit}' for count metric '{canonical_metric}'.")
+            return None, None, warnings
 
     elif target_unit in ("dbm", "db"):
+        accepted_units = {target_unit, "db", "dbm", "decibel", "decibels"}
+        if norm_unit not in accepted_units:
+            warnings.append(f"Unrecognized unit '{norm_unit}' for signal metric '{canonical_metric}'.")
+            return None, None, warnings
         norm_unit = target_unit
 
     # Bounds checking
@@ -248,7 +256,9 @@ def normalize_metric_value_and_unit(
     return round(val, 4), target_unit, warnings
 
 
-def normalize_metric_name(raw_name: str) -> tuple[str | None, str | None]:
+def normalize_metric_name(
+    raw_name: str, profile_aliases: dict[str, str] | None = None
+) -> tuple[str | None, str | None]:
     """Maps a raw metric name to its canonical vocabulary counterpart.
 
     Returns (canonical_name, warning).
@@ -257,6 +267,10 @@ def normalize_metric_name(raw_name: str) -> tuple[str | None, str | None]:
         return None, "Empty metric name."
 
     clean = raw_name.strip().lower()
+    if profile_aliases:
+        aliases = {key.strip().casefold(): value for key, value in profile_aliases.items()}
+        if clean in aliases:
+            return aliases[clean], None
     if clean in METRIC_SYNONYMS:
         return METRIC_SYNONYMS[clean], None
 

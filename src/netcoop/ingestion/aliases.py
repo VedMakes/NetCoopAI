@@ -19,7 +19,11 @@ class AliasResolutionResult:
 class EntityAliasResolver:
     """Resolves network device and interface aliases to canonical IDs."""
 
-    def __init__(self, alias_map: dict[str, str] | None = None) -> None:
+    def __init__(
+        self,
+        alias_map: dict[str, str] | None = None,
+        include_campus_defaults: bool = True,
+    ) -> None:
         """Initializes resolver with a mapping of alias -> canonical_id."""
         self._alias_to_canonical: dict[str, str] = {}
         self._ambiguous_aliases: set[str] = set()
@@ -44,8 +48,9 @@ class EntityAliasResolver:
         }
 
         # Load defaults
-        for alias, canonical in default_map.items():
-            self.register_alias(alias, canonical)
+        if include_campus_defaults:
+            for alias, canonical in default_map.items():
+                self.register_alias(alias, canonical)
 
         # Merge user/scenario mapping if provided
         if alias_map:

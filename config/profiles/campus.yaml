@@ -1,0 +1,53 @@
+profile_id: campus-example
+version: "1.0"
+display_name: Example campus network
+
+# Source entity name -> canonical name used in telemetry, topology, and reports.
+entity_aliases:
+  SW_CAMPUS_1: SW_CORE_01
+  SW_CAMPUS_2: SW_DIST_HOSTEL
+  SW_CAMPUS_3: SW_DIST_DEPT
+  SW_CAMPUS_4: SW_ACCESS_LAB
+  SW_CORE: SW_CORE_01
+  CORE_SWITCH: SW_CORE_01
+  HOSTEL_SWITCH: SW_DIST_HOSTEL
+  DEPT_SWITCH: SW_DIST_DEPT
+  LAB_SWITCH: SW_ACCESS_LAB
+  HOSTEL_CORE_SW_01: SW_DIST_HOSTEL
+  GATEWAY_EDGE: GW_EDGE_01
+  EDGE_GW: GW_EDGE_01
+  DNS_SERVER: SRV_DNS_01
+  DHCP_SERVER: SRV_DHCP_01
+
+metric_mappings:
+  cpu_pct:
+    canonical_name: cpu_utilization_pct
+    source_unit: percent
+  rtt_ms:
+    canonical_name: latency_ms
+    source_unit: milliseconds
+  if_in_errors:
+    canonical_name: interface_errors
+    source_unit: count
+  egress_queue_discards:
+    canonical_name: queue_drops
+    source_unit: count
+
+entity_roles:
+  SRV_DNS_01: [dns_resolver, service]
+  SRV_DHCP_01: [dhcp_server, service]
+  GW_EDGE_01: [edge, anchor]
+  SW_CORE_01: [core, anchor]
+
+topology_anchors: [GW_EDGE_01, SW_CORE_01]
+
+relationship_aliases:
+  ethernet: connected_to
+  wireless: connected_to
+  trunk: connected_to
+  physical_link: connected_to
+
+logical_relationships: [dns, dhcp, default_gateway, uplink, wireless_access]
+topology_completeness: complete
+
+rule_overrides: {}

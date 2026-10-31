@@ -110,6 +110,8 @@ class OpenRouterProvider:
             "4. NEVER invent or fabricate non-existent finding or observation IDs. Any unknown ID will cause the release gate to reject your diagnosis.\n"
             "5. If normal telemetry is observed without anomalies, set decision to 'abstain' with abstain_reason.\n"
             "6. Classify any competing hypotheses between towers and disclose them in alternative_causes.\n"
+            "7. Distinguish independent simultaneous faults from competing explanations; list supported independent faults in concurrent_causes.\n"
+            "8. Treat data-quality warnings and sparse observations as limitations; lower confidence or abstain when coverage cannot support a diagnosis.\n"
             "7. Output JSON format:\n"
             "{\n"
             '  "decision": "propose_diagnosis" | "request_evidence" | "abstain",\n'
@@ -118,6 +120,7 @@ class OpenRouterProvider:
             '  "supporting_finding_refs": ["VALID_FINDING_ID"],\n'
             '  "confidence_category": "high" | "moderate" | "low" | "insufficient",\n'
             '  "alternative_causes": ["ALTERNATIVE_FAULT_CODE"],\n'
+            '  "concurrent_causes": ["INDEPENDENT_FAULT_CODE"],\n'
             '  "recommended_actions": ["Safe read-only check recommendation"],\n'
             '  "abstain_reason": null or "Reason for abstention",\n'
             '  "requested_tasks": [],\n'
@@ -135,6 +138,8 @@ class OpenRouterProvider:
                 "affected_entities": dossier.affected_entities,
                 "investigation_round": dossier.investigation_round,
                 "task_history": dossier.task_history,
+                "data_quality_warnings": dossier.data_quality_warnings,
+                "topology_summary": dossier.topology_summary,
                 "available_capabilities": dossier.available_capabilities[:8],
                 "towers": towers_summary,
             },
@@ -231,6 +236,7 @@ class OpenRouterProvider:
             supporting_finding_refs=cited_findings,
             confidence_category=confidence_cat,
             alternative_causes=data.get("alternative_causes", []),
+            concurrent_causes=data.get("concurrent_causes", []),
             recommended_actions=data.get("recommended_actions", ["Perform detailed interface telemetry review."]),
             abstain_reason=data.get("abstain_reason") if decision == ProposalDecision.ABSTAIN else None,
             requested_tasks=data.get("requested_tasks", []),

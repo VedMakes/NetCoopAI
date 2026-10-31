@@ -2,12 +2,12 @@
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Tests: 132 passed](https://img.shields.io/badge/tests-132%20passed-brightgreen.svg)]()
+[![Tests: 192 passed](https://img.shields.io/badge/tests-192%20passed-brightgreen.svg)]()
 [![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
 
 **NetCoop AI** is an autonomous multi-agent cooperative network diagnostic platform engineered to triage, correlate, and determine root causes for campus and enterprise network incidents.
 
-Unlike monolithic LLM chatbots, NetCoop AI uses a modular **specialist-tower architecture** coordinated by an asynchronous integration fabric, governed by a Supervisory RCA Agent, and rigorously certified by an anti-hallucination **Evidence Release Gate**.
+Unlike a monolithic diagnostic engine, NetCoop AI uses four specialist towers coordinated by a supervisor through a typed in-process integration fabric. The evidence gate verifies cited findings and observations before publishing a report.
 
 ---
 
@@ -18,16 +18,19 @@ Unlike monolithic LLM chatbots, NetCoop AI uses a modular **specialist-tower arc
   - **Infrastructure Tower**: Monitors hardware health, CPU/memory saturation, interface state flaps, and system log error bursts.
   - **Connectivity Tower**: Constructs dynamic network graph topologies, computes blast radiuses, isolates partitions, and identifies common upstream chokepoints.
   - **Services Tower**: Validates critical application protocol health (DNS resolution latencies, DHCP pool exhaustion, NTP synchronization, and configuration drift).
-- **Asynchronous Integration Fabric**:
-  - Event Bus with deterministic priority ordering and idempotent event delivery.
-  - Query Router enforcing bounded peer queries between towers.
-  - Task Dispatcher with strict supervisor-only delegation and counter-proposal lifecycle.
+- **Integration Fabric**:
+  - In-process Event Bus for findings notifications.
+  - Typed, one-hop Query Router for read-only peer checks. Services asks Connectivity to trace declared DNS and DHCP paths; request, result, status, and topology evidence appear in the final report.
+  - Task Dispatcher with supervisor-only delegation, scoped versioned artifacts, counter-proposal lifecycle, and budgeted follow-up.
+- **Supervised orchestration**: The runtime owns incident state, task authorization, query routing policy, budgets, evidence merging, conflict handling, and publication. Tower findings remain independently auditable.
 - **Evidence Release Gate**:
-  - Independent verification barrier that checks every claim and citation against ground-truth canonical observation IDs before any diagnosis is released.
-  - Completely eliminates LLM hallucinations and unverified root causes.
+  - Independent verification barrier that checks cited findings, observation provenance, incident scope, data quality warnings, and orchestration history before a diagnosis is released.
+- **Input resilience**: JSON, JSONL, and narrow or wide CSV ingestion; malformed records are quarantined, missing timestamps are not invented, and unknown metrics or incompatible units are surfaced as data quality issues.
+- **Network profiles**: Versioned YAML profiles map source field names, entity aliases, metric names and units, counter semantics, service roles, topology relationships, anchors, completeness, and supported rule thresholds without changing tower code.
+- **Evidence-aware diagnosis**: Concurrent causes remain visible, sparse temporal signals are called out, and missing paths in partial or unknown topologies do not become outage proof.
 - **100% Offline Determinism with Optional LLM Mode**:
-  - Runs out of the box with zero external dependencies, zero API keys, and zero network calls.
-  - Optional `--llm auto` and `--llm on` support to enrich reports using Gemini / LLM providers when configured.
+  - Deterministic diagnosis runs offline without API keys or network calls.
+  - Optional `--llm auto` and `--llm on` modes can enrich reports when a supported provider is configured.
 - **Rich CLI & Reporting Experience**:
   - Terminal-native Rich UI with status tables, progress indicators, and visual diagnostic synthesis.
   - Machine-readable JSON export conforming to `FinalReport` schema and human-readable Markdown incident briefs.
@@ -134,6 +137,15 @@ uv run netcoop diagnose fixtures/scenarios/weak_wifi --format markdown -o report
 # Export machine-readable JSON for automated response
 uv run netcoop diagnose fixtures/scenarios/device_overload --format json -o report.json
 
+# Use and validate a deployment-specific network profile
+uv run netcoop profile-init path/to/sample-data --name "Branch office" --output config/profiles/branch-office.yaml
+# For unfamiliar flat records, provide source field mappings (repeat as needed)
+uv run netcoop profile-init vendor.jsonl --name "Vendor lab" --output vendor-profile.yaml \
+  --source-field entity_id=node --source-field timestamp=observed_at \
+  --source-field metric=measurement --source-field value=reading --source-field unit=units
+uv run netcoop profile-validate config/profiles/campus.yaml --data fixtures/scenarios/dns_failure
+uv run netcoop diagnose fixtures/scenarios/dns_failure --profile config/profiles/campus.yaml --format json
+
 # Persist findings and events to SQLite database
 uv run netcoop diagnose fixtures/scenarios/dns_failure --db incident.db
 ```
@@ -169,6 +181,8 @@ The repository includes pre-built synthetic network incident scenarios in `fixtu
 | `dns_failure` | Services | DNS Daemon Latency & SERVFAIL | `DNS_FAILURE` |
 | `dhcp_failure` | Services | DHCP Pool Exhaustion & NAKs | `DHCP_FAILURE` |
 
+The included generator is useful for deterministic regression checks, not a representative estimate of real-world accuracy. It emits seven presets from one fixed campus topology, with one injected fault class per run and a narrow synthetic observation schema. The challenge brief also calls out incomplete, inconsistent, outdated, noisy, and incompatible telemetry, but these dimensions are not systematically represented by those presets. The current 21/21 multi-seed score is therefore an in-domain regression result, not a real-world accuracy estimate. We add metamorphic and adversarial probes (mixed faults, sparse windows, malformed exports, unknown topology, alternate names/units/fields) and report their results separately; synthetic transformations still do not replace evaluation against authorized production-like captures or independent network simulators.
+
 ---
 
 ## Testing & Quality Assurance
@@ -176,8 +190,11 @@ The repository includes pre-built synthetic network incident scenarios in `fixtu
 NetCoop AI maintains a rigorous test suite covering contracts, ingestion, feature engineering, SQLite persistence, inter-agent fabric, specialist towers, supervisory reasoning, evidence gate, and CLI operations:
 
 ```bash
-# Run all 132 unit tests
+# Run all 192 tests
 uv run pytest -v
+
+# Evaluate the repository's synthetic generator across multiple deterministic seeds
+uv run python scripts/evaluate_generator.py --seeds 7,42,2026
 
 # Run code style and linter checks
 uv run ruff check .
@@ -191,6 +208,9 @@ uv run ruff check .
 - [System Architecture](docs/ARCHITECTURE.md)
 - [Implementation Playbook](docs/IMPLEMENTATION_PLAYBOOK.md)
 - [Inter-Agent Communication Specification](docs/INTERAGENT_COMMS.md)
+- [Network Profiles and Adaptation](docs/NETWORK_PROFILES.md)
+- [Inter-Agent Communication and Orchestration](docs/INTERAGENT_COMMS.md)
+- [Implementation Decisions and Evaluation Evidence](docs/DECISIONS.md)
 - [Team Phase Plan](docs/TEAM_PHASE_PLAN.md)
 - [Collaboration Log](docs/COLLAB_LOG.md)
 

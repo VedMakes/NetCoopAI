@@ -70,6 +70,18 @@ def _make_sample_topology() -> list[TopologyObservation]:
     ]
 
 
+def test_service_dependency_does_not_fabricate_a_physical_path():
+    dependency = TopologyObservation(
+        observation_id="DEP-DNS-1", incident_id="INC-DEP", source="topology_json",
+        entity_id="HOSTEL_ZONE_A", source_entity="HOSTEL_ZONE_A", target_entity="SRV_DNS_01",
+        relationship_type="dns", timestamp=datetime(2026, 10, 31, 12, 0, tzinfo=timezone.utc),
+    )
+    graph = TopologyGraph()
+    graph.build_from_observations([dependency])
+
+    assert graph.trace_path("HOSTEL_ZONE_A", "SRV_DNS_01")["reachable"] is False
+
+
 def test_topology_graph_construction_and_path():
     topo = TopologyGraph()
     topo.build_from_observations(_make_sample_topology())
@@ -102,6 +114,23 @@ def test_topology_graph_refuses_to_invent_missing_path():
     res_unk = topo.trace_path("NON_EXISTENT_DEV", "SW_CORE_01")
     assert res_unk["reachable"] is False
     assert "Refusing to fabricate path" in res_unk["warning"]
+
+
+def test_topology_graph_preserves_parallel_links_and_both_evidence_refs():
+    topo = TopologyGraph()
+    links = _make_sample_topology()[:1]
+    parallel = links[0].model_copy(update={
+        "observation_id": "TOPO-PARALLEL",
+        "interface_name": "SW_CORE_01:Gi0/9",
+        "link_speed_mbps": 40000.0,
+    })
+    topo.build_from_observations([*links, parallel])
+
+    result = topo.trace_path("SW_CORE_01", "GW_EDGE_01")
+
+    assert topo.graph.number_of_edges("SW_CORE_01", "GW_EDGE_01") == 2
+    assert result["link_details"][0]["parallel_link_count"] == 2
+    assert set(result["evidence_refs"]) == {links[0].observation_id, "TOPO-PARALLEL"}
 
 
 def test_common_upstream_dependency_identification():
@@ -271,4 +300,4 @@ def test_connectivity_peer_queries_and_tasks():
     t_res = tower.handle_task(task)
     assert t_res.status == TaskStatus.COMPLETED
     assert t_res.assignee == TowerId.CONNECTIVITY
-    assert t_res.result["reachable"] is True
+    assert t_res.result["analysis"]["reachable"] is True

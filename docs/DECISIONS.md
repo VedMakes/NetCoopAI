@@ -82,3 +82,22 @@ Use this format:
 - Alternatives considered: Pure custom synthetic schema without organizer alignment.
 - Consequences and migration impact: Ingestion and contracts will natively parse and validate this schema structure while mapping it cleanly to canonical typed observations.
 
+## DEC-008: Preserve temporal evidence and consume bounded specialist artifacts
+- Date: 2026-10-31
+- Status: ACCEPTED
+- Context: Runs on the repository's own generator correctly classified the seven presets, but a single fault-like sample in an otherwise healthy time series was diagnosed as confirmed congestion. Reports also mixed baseline observations into fault evidence. A merged DNS-plus-congestion capture was reduced to one primary cause, and delegated task results were only logged rather than passed back to the supervisor.
+- Decision: Correlate congestion signals by sample time, require repeated pressure in a time series, keep a single complete snapshot low confidence, and identify sparse temporal support in report limitations. Cite only out-of-threshold observations and preserve their values, units, sources and timestamps. Allow disjoint fault hypotheses to appear as concurrent causes unless a known causal conflict requires investigation. Infer direct impact only from supplied topology and label it as inferred. Route tasks to the tower owning the declared capability, return a versioned diagnostic artifact, validate incident scope and contracts, then merge accepted findings into the supervisor dossier before arbitration.
+- Research basis: This manager-owned workflow follows the manager pattern described in [OpenAI's orchestration guidance](https://developers.openai.com/api/docs/guides/agents/orchestration). The task lifecycle and separate result artifact are compatible with concepts in the [A2A specification](https://a2a-protocol.org/v1.0.0/), without claiming A2A wire-protocol conformance. The hierarchy, capability routing, task lifecycle and semantic vocabulary choices are also consistent with relevant design areas in [ETSI GS ZSM 022](https://www.etsi.org/deliver/etsi_gs/ZSM/001_099/022/01.01.01_60/gs_ZSM022v010101p.pdf), especially clauses 4.3, 5.3 and 5.4; this project does not claim ETSI conformance.
+- Alternatives considered: Peak-only thresholding; treat every competing hypothesis as an alternative cause; dispatch based on the first tower mentioned in a conflict; keep specialist results as unvalidated log text.
+- Consequences and migration impact: Diagnoses from sparse data are explicitly lower confidence. Concurrent faults remain visible in JSON and Markdown. Task handlers must use the shared artifact schema and report task failures instead of substituting unrelated defaults.
+
+## DEC-009: Exercise and expose a bounded peer query in service incidents
+- Date: 2026-10-31
+- Status: ACCEPTED
+- Context: The QueryRouter was implemented and unit-tested, but the ordinary diagnose path did not demonstrate a peer request affecting supervisory reasoning or report output.
+- Decision: When DNS/DHCP hypotheses have a matching service dependency, Services asks Connectivity for a read-only path trace. Store the request, response, evidence references and warnings in the dossier and final report; use a completed path result when resolving DNS-versus-routing hypotheses.
+- Evidence: The repository generator's DNS preset returns `reachable=true` for HOSTEL_ZONE_A to SRV_DNS_01, with four link evidence references; the DHCP preset now exercises the matching relay path too. A compound DNS+DHCP capture records both queries. The 21-case generator matrix (seven presets x three seeds) retained 100% exact class and target matches after this change.
+- Research basis: ETSI GS ZSM 022 covers agent communication, task delegation and semantic interoperability (clause 5.3 and 5.4); this implementation borrows the bounded capability interaction pattern and does not claim conformance. [ETSI GS ZSM 022](https://www.etsi.org/deliver/etsi_gs/ZSM/001_099/022/01.01.01_60/gs_ZSM022v010101p.pdf).
+- Alternatives considered: Keep peer queries as isolated API features; add unbounded tower-to-tower chat.
+- Consequences and migration impact: Successful, unknown, skipped, and failed peer interactions are auditable in the report. Queries are limited to cases with a topology-declared DNS/DHCP dependency and capped at eight unique pairs per incident; missing topology does not trigger a guessed query, and incomplete topology does not make an absent route proof of an outage.
+

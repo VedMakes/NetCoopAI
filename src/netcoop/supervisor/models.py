@@ -67,6 +67,7 @@ class ConflictItem(BaseModel):
     competing_hypotheses: list[str]
     description: str
     recommended_discriminating_task: str | None = None
+    recommended_assignee: TowerId | None = None
     disposition: str | None = None  # e.g., "resolved_by_topology", "unresolved_ambiguity"
 
 
@@ -130,5 +131,6 @@ class IncidentDossier(BaseModel):
     conflicts: list[ConflictItem] = Field(default_factory=list)
     investigation_round: int = 1
     task_history: list[dict[str, Any]] = Field(default_factory=list)
+    peer_query_history: list[dict[str, Any]] = Field(default_factory=list)
     available_capabilities: list[str] = Field(default_factory=list)
     data_quality_warnings: list[str] = Field(default_factory=list)
