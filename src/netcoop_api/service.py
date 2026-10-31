@@ -35,6 +35,8 @@ from netcoop_api.schemas import (
     DerivedFeatureModel,
     EvaluationResponse,
     ExecutionEventModel,
+    GateCheckResultModel,
+    GateResultDetail,
     RunCreateRequest,
     RunStatusResponse,
     ScenarioDetail,
@@ -487,6 +489,31 @@ class RunManager:
             if not rec:
                 return None
             return rec.report
+
+    def get_run_gate(self, run_id: str) -> GateResultDetail | None:
+        with self._lock:
+            rec = self._runs.get(run_id)
+            if not rec or not rec.gate_result:
+                return None
+        gr = rec.gate_result
+        return GateResultDetail(
+            incident_id=rec.incident_id,
+            outcome=gr.outcome.value if hasattr(gr.outcome, "value") else str(gr.outcome),
+            passed=gr.passed,
+            checks=[
+                GateCheckResultModel(
+                    check_name=c.check_name,
+                    passed=c.passed,
+                    message=c.message,
+                    severity=c.severity,
+                )
+                for c in gr.checks
+            ],
+            errors=gr.errors,
+            warnings=gr.warnings,
+            limitations=gr.limitations,
+            evaluated_at=gr.evaluated_at.isoformat() if getattr(gr, "evaluated_at", None) else None,
+        )
 
     def get_run_evaluation(self, run_id: str) -> EvaluationResponse:
         with self._lock:

@@ -120,6 +120,24 @@ class TowerReportSummary(BaseModel):
     hypotheses: list[dict[str, Any]] = Field(default_factory=list)
 
 
+class GateCheckResultModel(BaseModel):
+    check_name: str
+    passed: bool
+    message: str
+    severity: str = "error"
+
+
+class GateResultDetail(BaseModel):
+    incident_id: str
+    outcome: str
+    passed: bool
+    checks: list[GateCheckResultModel] = Field(default_factory=list)
+    errors: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+    evaluated_at: str | None = None
+
+
 class GateResultSummary(BaseModel):
     incident_id: str
     outcome: str

@@ -133,6 +133,9 @@ Returns supervisor task dispatcher assignments, transitions, and peer queries.
 `GET /api/runs/{run_id}/report`
 Returns certified `FinalReport` object. Returns `400 Bad Request` if run has not finished.
 
+`GET /api/runs/{run_id}/gate`
+Returns independent `EvidenceReleaseGate` verification audit details (`outcome`, `passed`, `checks`, `warnings`, `limitations`, `evaluated_at`). Returns `400 Bad Request` if run has not completed.
+
 `GET /api/runs/{run_id}/evaluation`
 Evaluates the run against held-out ground truth. Strictly returns `400 Bad Request` if requested before diagnosis finishes.
 

@@ -12,6 +12,7 @@ from netcoop_api.events import event_sink
 from netcoop_api.schemas import (
     EvaluationResponse,
     ExecutionEventModel,
+    GateResultDetail,
     RunCreateRequest,
     RunStatusResponse,
     TelemetryResponse,
@@ -114,6 +115,18 @@ def get_run_report(run_id: str) -> FinalReport:
     if not report:
         raise HTTPException(status_code=400, detail="Report not ready: diagnosis is still in progress or failed")
     return report
+
+
+@router.get("/{run_id}/gate", response_model=GateResultDetail)
+def get_run_gate(run_id: str) -> GateResultDetail:
+    """Returns Evidence Release Gate verification results and check breakdowns."""
+    run = run_manager.get_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
+    gate = run_manager.get_run_gate(run_id)
+    if not gate:
+        raise HTTPException(status_code=400, detail="Gate verification not available: run pending or failed")
+    return gate
 
 
 @router.get("/{run_id}/evaluation", response_model=EvaluationResponse)

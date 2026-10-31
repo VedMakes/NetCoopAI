@@ -1,8 +1,10 @@
 import {
   AssistantResponse,
+  DiagnosticTask,
   EvaluationResponse,
   ExecutionEvent,
   FinalReport,
+  GateResultDetail,
   RunCreateRequest,
   RunStatusResponse,
   ScenarioDetail,
@@ -81,7 +83,7 @@ export async function getRunFindings(runId: string): Promise<TowerReportSummary[
   return res.json();
 }
 
-export async function getRunTasks(runId: string): Promise<any[]> {
+export async function getRunTasks(runId: string): Promise<DiagnosticTask[]> {
   const res = await fetch(`${API_BASE}/runs/${runId}/tasks`);
   if (!res.ok) throw new Error(`Failed to get tasks: ${res.statusText}`);
   return res.json();
@@ -92,6 +94,15 @@ export async function getRunReport(runId: string): Promise<FinalReport> {
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }));
     throw new Error(err.detail || 'Final report not ready');
+  }
+  return res.json();
+}
+
+export async function getRunGate(runId: string): Promise<GateResultDetail> {
+  const res = await fetch(`${API_BASE}/runs/${runId}/gate`);
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(err.detail || 'Gate verification not ready');
   }
   return res.json();
 }

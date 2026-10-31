@@ -143,6 +143,31 @@ export interface SupportingEvidenceItem {
   source?: string;
 }
 
+export interface PredictedImpactItem {
+  entity_id: string;
+  relation: string;
+  inferred_from: string;
+  path: string[];
+  hops: number;
+  certainty: string;
+  topology_evidence_refs?: string[];
+}
+
+export interface PathTraceItem {
+  source_entity: string;
+  target_entity: string;
+  reachable: boolean;
+  path: string[];
+  evidence_refs: string[];
+  warning?: string | null;
+}
+
+export interface PathTriageReport {
+  status: string;
+  paths: PathTraceItem[];
+  limitations: string[];
+}
+
 export interface FinalReport {
   incident_id: string;
   status: string;
@@ -155,9 +180,46 @@ export interface FinalReport {
   inferred_affected_entities: string[];
   supporting_evidence: SupportingEvidenceItem[];
   alternative_causes: string[];
+  concurrent_causes?: string[];
   recommended_actions: string[];
   evidence_sources: string[];
   limitations?: string[];
+  predicted_impacts?: PredictedImpactItem[];
+  path_triage?: PathTriageReport | null;
+  peer_interactions?: any[];
+  operator_questions?: string[];
+  data_quality_warnings?: string[];
+  orchestration_warnings?: string[];
+  generated_at?: string;
+}
+
+export interface GateCheckResult {
+  check_name: string;
+  passed: boolean;
+  message: string;
+  severity: 'error' | 'warning';
+}
+
+export interface GateResultDetail {
+  incident_id: string;
+  outcome: string;
+  passed: boolean;
+  checks: GateCheckResult[];
+  errors: string[];
+  warnings: string[];
+  limitations: string[];
+  evaluated_at?: string;
+}
+
+export interface DiagnosticTask {
+  task_id: string;
+  incident_id: string;
+  assigned_tower: string;
+  task_type: string;
+  status: string;
+  priority: number;
+  created_at: string;
+  description: string;
 }
 
 export interface EvaluationResponse {

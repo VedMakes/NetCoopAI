@@ -140,6 +140,14 @@ def test_run_lifecycle_and_artifacts(client: TestClient):
     assert "LINK_CONGESTION" in report["suspected_root_cause"]
     assert len(report["supporting_evidence"]) > 0
 
+    # 7b. Gate Result
+    gate_res = client.get(f"/api/runs/{run_id}/gate")
+    assert gate_res.status_code == 200
+    gate_data = gate_res.json()
+    assert gate_data["passed"] is True
+    assert "PASS" in gate_data["outcome"]
+    assert len(gate_data["checks"]) > 0
+
     # 8. Post-diagnosis evaluation against ground truth
     eval_res = client.get(f"/api/runs/{run_id}/evaluation")
     assert eval_res.status_code == 200
