@@ -6,6 +6,7 @@ from netcoop.communication.queries import PeerQuery, PeerQueryResult
 from netcoop.communication.registry import TowerCapability
 from netcoop.communication.tasks import InvestigationTask, TaskResult
 from netcoop.models.enums import TowerId
+from netcoop.models.observations import CanonicalObservation
 from netcoop.models.reports import TowerReport
 
 
@@ -29,6 +30,8 @@ class TowerController(Protocol):
         """Executes a persistent, supervisor-authorized investigation task."""
         ...
 
-    def analyze_incident(self, incident_id: str) -> TowerReport:
+    def analyze_incident(
+        self, incident_id: str, observations: list[CanonicalObservation] | None = None
+    ) -> TowerReport:
         """Runs the deterministic diagnostic engines on the incident scope and emits a TowerReport."""
         ...
