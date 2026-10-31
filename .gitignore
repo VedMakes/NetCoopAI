@@ -59,6 +59,4 @@ Thumbs.db
 *.swp
 *.swo
 *~
-docs/
-.github/
-reference/
+
