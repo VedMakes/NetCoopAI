@@ -28,6 +28,31 @@ DEFAULT_FREE_MODEL = "nvidia/nemotron-3.5-lightning:free"
 DEFAULT_OPENROUTER_URL = "https://openrouter.ai/api/v1"
 
 
+def call_openrouter_chat(
+    payload: dict[str, Any],
+    *,
+    api_key: str,
+    base_url: str = DEFAULT_OPENROUTER_URL,
+    timeout_seconds: float = 30.0,
+) -> str:
+    """Shared transport for isolated supervisory add-on providers."""
+    url = f"{base_url.rstrip('/')}/chat/completions"
+    data_bytes = json.dumps(payload).encode("utf-8")
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://github.com/NetCoopAI/netcoop",
+        "X-Title": "NetCoop AI",
+    }
+    req = urllib.request.Request(url, data=data_bytes, headers=headers, method="POST")
+    with urllib.request.urlopen(req, timeout=timeout_seconds) as response:
+        resp_json = json.loads(response.read().decode("utf-8"))
+    choices = resp_json.get("choices", [])
+    if not choices:
+        raise ValueError("OpenRouter API returned empty choices array.")
+    return choices[0].get("message", {}).get("content", "")
+
+
 class OpenRouterProvider:
     """OpenRouter API adapter for case-level LLM diagnostic reasoning."""
 
@@ -158,25 +183,12 @@ class OpenRouterProvider:
 
     def _call_openrouter(self, payload: dict[str, Any]) -> str:
         """Executes HTTP request to OpenRouter chat completions endpoint."""
-        url = f"{self.base_url}/chat/completions"
-        data_bytes = json.dumps(payload).encode("utf-8")
-
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-            "HTTP-Referer": "https://github.com/NetCoopAI/netcoop",
-            "X-Title": "NetCoop AI",
-        }
-
-        req = urllib.request.Request(url, data=data_bytes, headers=headers, method="POST")
-        with urllib.request.urlopen(req, timeout=self.timeout_seconds) as response:
-            resp_body = response.read().decode("utf-8")
-            resp_json = json.loads(resp_body)
-            choices = resp_json.get("choices", [])
-            if not choices:
-                raise ValueError("OpenRouter API returned empty choices array.")
-            content = choices[0].get("message", {}).get("content", "")
-            return content
+        return call_openrouter_chat(
+            payload,
+            api_key=self.api_key,
+            base_url=self.base_url,
+            timeout_seconds=self.timeout_seconds,
+        )
 
     def _parse_and_validate_response(
         self, raw_content: str, dossier: IncidentDossier

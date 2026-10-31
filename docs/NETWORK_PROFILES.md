@@ -1,6 +1,6 @@
 # Network profiles
 
-A profile maps a network's names and policy into NetCoop's current canonical observations. It does not add a collector or invent meaning for unknown fields. Keep one profile per deployment and commit it alongside its evaluation cases.
+A profile maps a network's names and policy into NetCoop's supported observation format. It does not add a collector or invent meaning for unknown fields. Keep one reviewed profile per deployment under `config/profiles/`.
 
 ## Validate and run
 
@@ -8,9 +8,14 @@ A profile maps a network's names and policy into NetCoop's current canonical obs
 netcoop profile-init path/to/sample-data --name "Branch office" --output config/profiles/branch-office.yaml
 netcoop profile-validate config/profiles/campus.yaml --data fixtures/scenarios/dns_failure
 netcoop diagnose path/to/telemetry --profile config/profiles/campus.yaml --format json
+
+# Use a site profile and standalone topology sitemap during field triage
+netcoop triage ./office-capture --site office-east --sitemap ./office-east-topology.json
 ```
 
 `profile-init` drafts mappings for source metric names NetCoop recognizes and lists observed entities. It deliberately leaves entity aliases, DNS/DHCP roles, topology anchors, and topology completeness for operator review. `profile-validate` checks the profile contract and, when given data, reports normalized observation count, whether configured topology anchors and DNS/DHCP roles appeared, and input warnings. Reports retain the profile ID and version.
+
+Capture data is supplied as a local file or directory path. A directory can include `topology.json`, or pass a separate sitemap with `--sitemap`/`--topology`. Site-wide maps may be stored at `config/sites/<site>/topology.json`; `triage --site <site>` loads that map when no explicit sitemap is supplied. A matching `config/profiles/<site>.yaml` applies that site's source mappings and aliases. These paths are local CLI inputs; no web upload service is included.
 
 For unfamiliar flat JSON/JSONL/CSV records, tell `profile-init` which source keys carry the standard fields. These repeatable options are preserved in the draft and let it inspect names and units before diagnosis:
 
@@ -40,6 +45,6 @@ Counter differencing assumes samples for one entity and metric belong to the sam
 
 ## Examples and boundary
 
-`config/profiles/campus.yaml` documents the sample network. `config/profiles/branch-office-example.yaml` illustrates different device names, roles, source metric names, units, anchors, and thresholds. The branch example is validated against a transformed synthetic case in the tests; it is not a production vendor adapter.
+`config/profiles/campus.yaml` and `config/profiles/branch-office-example.yaml` illustrate different names, roles, units, anchors, and thresholds. They are examples only; review and adapt them to your site before using them for operations.
 
 OpenConfig models use YANG and aim to provide consistent vendor-neutral models for common operational needs, while not covering every feature. IETF YANG defines structured network configuration/state and operations; gNMI exposes path-based telemetry subscriptions. These are appropriate future adapter targets, but this release accepts local JSON/JSONL/CSV inputs and does not connect to devices or parse arbitrary YANG models. [OpenConfig models](https://openconfig.net/projects/models/), [IETF RFC 7950](https://www.rfc-editor.org/info/rfc7950/), [gNMI subscription contract](https://github.com/openconfig/gnmi/blob/master/proto/gnmi/gnmi.proto).

@@ -1,6 +1,6 @@
 # NetCoop AI: Autonomous Multi-Agent Network Root Cause Analysis
 
-[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Tests: 193 passed](https://img.shields.io/badge/tests-193%20passed-brightgreen.svg)]()
 [![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
@@ -28,11 +28,13 @@ Unlike a monolithic diagnostic engine, NetCoop AI uses four specialist towers co
 - **Input resilience**: JSON, JSONL, and narrow or wide CSV ingestion; malformed records are quarantined, missing timestamps are not invented, and unknown metrics or incompatible units are surfaced as data quality issues.
 - **Network profiles**: Versioned YAML profiles map source field names, entity aliases, metric names and units, counter semantics, service roles, topology relationships, anchors, completeness, and supported rule thresholds without changing tower code.
 - **Evidence-aware diagnosis**: Concurrent causes remain visible, sparse temporal signals are called out, and missing paths in partial or unknown topologies do not become outage proof.
+- **Supplemental triage**: After the evidence gate makes its decision, the report can include topology reachability traces between observed and predicted-affected entities. These traces do not change the diagnosis and are not presented as proof of causation. `diagnose --symptom "…"` optionally invokes a separate symptom context agent after publication. It receives the report, specialist evidence, relevant observations, and topology addendum; it cannot change the certified diagnosis. With `--llm off` it uses conservative local rules; with configured `--llm auto` or `--llm on` it may use a separate model call.
 - **100% Offline Determinism with Optional LLM Mode**:
   - Deterministic diagnosis runs offline without API keys or network calls.
   - Optional `--llm auto` and `--llm on` modes can enrich reports when a supported provider is configured.
 - **Rich CLI & Reporting Experience**:
-  - Terminal-native Rich UI with status tables, progress indicators, and visual diagnostic synthesis.
+  - End-inspired amethyst/lavender terminal palette, rounded diagnosis panels, compact confidence bar, and quiet spinners/progress for longer interactive runs.
+  - Animations stay off for redirected output and JSON/Markdown modes; set `NO_COLOR=1` to suppress interactive spinners.
   - Machine-readable JSON export conforming to `FinalReport` schema and human-readable Markdown incident briefs.
 
 ---
@@ -78,24 +80,42 @@ flowchart TD
 
 ## Installation & Setup
 
-NetCoop AI is built with modern Python packaging via `uv`.
+NetCoop AI runs locally as a Python command-line application. Python 3.12 or newer is required. `uv` is the recommended environment manager; a standard virtual environment also works.
 
 ### Prerequisites
-- Python 3.11+
+- Python 3.12+
 - [uv](https://github.com/astral-sh/uv) (recommended) or standard `pip`
 
 ### Quick Setup
 
 ```bash
-# Clone the repository
-git clone https://github.com/your-org/netcoop-ai.git
-cd netcoop-ai
+# Clone and enter the repository
+git clone https://github.com/VedMakes/NetCoopAI.git
+cd NetCoopAI
 
-# Create virtual environment and install dependencies
+# Install application dependencies into the project environment
 uv sync
 
-# Verify installation with system doctor
+# Check the local installation and run the offline demo
 uv run netcoop doctor
+uv run netcoop demo
+```
+
+For development or to run the automated suite, install optional development tools with `uv sync --extra dev`. Without `uv`, use a Python 3.12 virtual environment:
+
+```bash
+python3.12 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e ".[dev]"
+netcoop doctor
+```
+
+The default diagnosis mode is offline. To enable the optional OpenRouter model path, set `OPENROUTER_API_KEY` in your shell and select `--llm auto` (use `--llm on` to require the configured provider):
+
+```bash
+export OPENROUTER_API_KEY="your-key"
+uv run netcoop triage ./office-capture --llm auto
 ```
 
 ---
@@ -131,6 +151,18 @@ Diagnoses any scenario folder or raw telemetry file.
 # Interactive Rich terminal output
 uv run netcoop diagnose fixtures/scenarios/link_congestion
 
+# Quick field workflow: local capture, site identity, optional caller symptom
+uv run netcoop triage ./office-capture --site office-east \
+  --symptom "Wi-Fi drops in the second-floor meeting rooms"
+
+# Supply a separate sitemap when it is not inside the capture directory
+uv run netcoop triage ./office-capture --site office-east --sitemap ./office-east-topology.json
+
+# Draft a site profile from its sample data, then review and validate it
+uv run netcoop profile-init ./office-capture --name "Office East" \
+  --output config/profiles/office-east.yaml
+uv run netcoop profile-validate config/profiles/office-east.yaml --data ./office-capture
+
 # Export formatted Markdown report
 uv run netcoop diagnose fixtures/scenarios/weak_wifi --format markdown -o report.md
 
@@ -148,7 +180,14 @@ uv run netcoop diagnose fixtures/scenarios/dns_failure --profile config/profiles
 
 # Persist findings and events to SQLite database
 uv run netcoop diagnose fixtures/scenarios/dns_failure --db incident.db
+
+# Add an optional, post-diagnosis comparison with the caller's description
+uv run netcoop diagnose fixtures/scenarios/dns_failure --symptom "Users cannot resolve hostnames"
 ```
+
+`triage` is a field-friendly alias for `diagnose`. The first argument is local sample/capture data: a telemetry file, or a directory containing telemetry and optionally `topology.json`. `--sitemap`/`--topology` supplies a separate topology JSON; a saved site map at `config/sites/<site>/topology.json` is loaded automatically. `--site` tags the report and automatically loads `config/profiles/<site>.yaml` (or `.yml`) when present; otherwise NetCoop warns that it is using generic mappings. Use `--profile` to select another explicit profile. `profile-init` drafts a profile from local sample data and `profile-validate` checks it. The symptom agent runs only when `--symptom` is provided. This is a local CLI workflow; there is no browser-based upload endpoint.
+
+Path triage is part of the report as a separate supplemental section. Its queries run after the gate decision and report reachable, not reachable in recorded topology, or unknown, with any available route/evidence references. Incomplete topology can make a negative result inconclusive. The optional `--symptom` agent reports aligned, mismatch, or unclear and explains its comparison. Its model mode follows `--llm`; model failure falls back to local rules and is disclosed in the addendum. This remains a consistency check, not a diagnosis input.
 
 ### 5. Inspect Persisted Incidents (`inspect`)
 Queries the SQLite Knowledge Plane to audit tower findings, event bus histories, and certified final reports for an incident.
@@ -189,34 +228,12 @@ The JSON report keeps `affected_devices` as a compatibility union, and now separ
 
 ---
 
-## Testing & Quality Assurance
+## Documentation
 
-NetCoop AI maintains a rigorous test suite covering contracts, ingestion, feature engineering, SQLite persistence, inter-agent fabric, specialist towers, supervisory reasoning, evidence gate, and CLI operations:
-
-```bash
-# Run all 193 tests
-uv run pytest -v
-
-# Evaluate the repository's synthetic generator across multiple deterministic seeds
-uv run python scripts/evaluate_generator.py --seeds 7,42,2026
-
-# Run code style and linter checks
-uv run ruff check .
-```
-
----
-
-## Documentation Links
-
-- [3-5 Minute Demo Script](docs/DEMO_SCRIPT.md)
-- [System Architecture](docs/ARCHITECTURE.md)
-- [Implementation Playbook](docs/IMPLEMENTATION_PLAYBOOK.md)
-- [Inter-Agent Communication Specification](docs/INTERAGENT_COMMS.md)
+- [Local Input Formats](docs/INPUT_FORMATS.md)
 - [Network Profiles and Adaptation](docs/NETWORK_PROFILES.md)
-- [Inter-Agent Communication and Orchestration](docs/INTERAGENT_COMMS.md)
-- [Implementation Decisions and Evaluation Evidence](docs/DECISIONS.md)
-- [Team Phase Plan](docs/TEAM_PHASE_PLAN.md)
-- [Collaboration Log](docs/COLLAB_LOG.md)
+- [System Architecture](docs/ARCHITECTURE.md)
+- [3-5 Minute Demo Guide](docs/DEMO_SCRIPT.md)
 
 ---
 

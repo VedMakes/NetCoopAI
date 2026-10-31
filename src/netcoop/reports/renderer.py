@@ -37,6 +37,9 @@ def render_markdown_report(report: FinalReport, gate_result: Any | None = None) 
     else:
         lines.append("- None identified from cited observations")
 
+    if report.site_id:
+        lines.extend(["", f"**Site:** `{report.site_id}`"])
+
     if report.concurrent_causes:
         lines.extend(["", "**Concurrent suspected causes:**"])
         lines.extend(f"- {cause}" for cause in report.concurrent_causes)
@@ -134,14 +137,53 @@ def render_markdown_report(report: FinalReport, gate_result: Any | None = None) 
                 f"- `{interaction.get('requester')}` → `{interaction.get('recipient')}` "
                 f"`{interaction.get('capability')}` on {interaction.get('scope')}: "
                 f"{interaction.get('status')} ({outcome}); evidence {interaction.get('evidence_refs', [])}"
+                f"{' [supplemental, post-diagnosis]' if interaction.get('supplementary') else ''}"
             )
+
+    if report.path_triage:
+        lines.extend(["", "---", "", "## 6. Supplemental Path Triage", ""])
+        lines.append(f"**Status:** `{report.path_triage.status}`")
+        lines.append("Reachability describes the recorded topology and does not establish causation.")
+        if report.path_triage.paths:
+            lines.extend(["", "| Source | Target | Reachability | Path | Evidence |", "|---|---|---|---|---|"])
+            for item in report.path_triage.paths:
+                reachable = (
+                    "reachable" if item.reachable is True else
+                    "not reachable in recorded topology" if item.reachable is False else "unknown"
+                )
+                path = " → ".join(item.path) or "No path returned"
+                lines.append(
+                    f"| `{item.source_entity}` | `{item.target_entity}` | {reachable} | {path} | "
+                    f"{', '.join(item.evidence_refs) or 'none'} |"
+                )
+                if item.warning:
+                    lines.append(f"\nNote for `{item.source_entity}` → `{item.target_entity}`: {item.warning}")
+        if report.path_triage.limitations:
+            lines.extend(["", "Limitations:"])
+            lines.extend(f"- {limitation}" for limitation in report.path_triage.limitations)
+
+    if report.symptom_reasoning:
+        reasoning = report.symptom_reasoning
+        lines.extend(["", "---", "", "## 7. Optional Symptom Cross-check", ""])
+        lines.extend([
+            f"**Caller-reported wording:** {reasoning.reported_symptom}",
+            f"**Comparison:** `{reasoning.status}`",
+            f"**Analysis mode:** `{reasoning.agent_mode}`",
+            f"**Recognized categories:** {', '.join(reasoning.recognized_domains) or 'none'}",
+            f"**Matched fault codes:** {', '.join(reasoning.matched_fault_codes) or 'none'}",
+            "",
+            reasoning.explanation,
+        ])
+        if reasoning.warnings:
+            lines.extend(["", "Agent notes:"])
+            lines.extend(f"- {warning}" for warning in reasoning.warnings)
 
     if gate_result is not None:
         lines.extend([
             "",
             "---",
             "",
-            "## 6. Evidence Release Gate Verification",
+            "## Evidence Release Gate Verification",
             "",
             f"- **Gate Outcome:** `{gate_result.outcome.value.upper()}`",
             f"- **Certification Passed:** `{'YES' if gate_result.passed else 'NO'}`",

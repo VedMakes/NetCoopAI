@@ -134,7 +134,7 @@ def test_cli_diagnose_rich():
     scenario_path = Path("fixtures/scenarios/link_congestion")
     result = runner.invoke(app, ["diagnose", str(scenario_path)])
     assert result.exit_code == 0
-    assert "NetCoop AI Diagnostic Synthesis" in result.stdout
+    assert "NetCoop AI · Diagnostic Synthesis" in result.stdout
     assert "Domain Tower Diagnostic Summary" in result.stdout
     assert "LINK_CONGESTION" in result.stdout
     assert "Evidence Release Gate Verification" in result.stdout

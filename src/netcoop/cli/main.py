@@ -10,15 +10,18 @@ from __future__ import annotations
 import csv
 import json
 import os
+import re
 import sys
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import typer
 import yaml
-from rich.console import Console
+from rich.console import Console, Theme
 from rich.panel import Panel
+from rich.progress import BarColumn, MofNCompleteColumn, Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 
 from netcoop import __version__
@@ -45,6 +48,7 @@ from netcoop.supervisor.agent import (
 )
 from netcoop.supervisor.gate import EvidenceReleaseGate
 from netcoop.supervisor.runtime import EvidenceGateRejectionError, SupervisorRuntime
+from netcoop.supervisor.symptom_agent import SymptomReasoningAgent
 from netcoop.towers.rules import load_rules
 from netcoop.utils.env import load_dotenv
 from netcoop.utils.id_generator import generate_id
@@ -56,7 +60,54 @@ app = typer.Typer(
     help="NetCoop AI: Evidence-Backed Multi-Agent Network Fault Diagnosis",
     no_args_is_help=True,
 )
-console = Console()
+CLI_THEME = Theme({
+    "cyan": "#C7A7EF",
+    "bright_cyan": "#DEC9FA",
+    "magenta": "#C58DDC",
+    "blue": "#927DB6",
+    "bright_blue": "#B4A0DA",
+    "green": "#95C9AD",
+    "bright_green": "#B1DCC0",
+    "yellow": "#E4C681",
+    "red": "#D98F9F",
+    "dim": "dim #9D95AA",
+    "table.border": "#58496B",
+    "table.header": "bold #DCC8F4",
+    "table.title": "bold #E5D6F6",
+    "panel.border": "#786392",
+    "progress.description": "#D6C3ED",
+    "progress.percentage": "#C7A7EF",
+})
+console = Console(theme=CLI_THEME)
+
+
+def make_table(*args: Any, **kwargs: Any) -> Table:
+    """Apply the End-inspired amethyst table treatment consistently."""
+    kwargs.setdefault("border_style", "cyan")
+    kwargs.setdefault("header_style", "bright_cyan")
+    kwargs.setdefault("title_style", "bold bright_cyan")
+    kwargs.setdefault("row_styles", ["", "dim"])
+    return Table(*args, **kwargs)
+
+
+def _soft_status(message: str):
+    """Show a quiet animated spinner only on interactive terminals."""
+    if not console.is_terminal or os.environ.get("NO_COLOR"):
+        return nullcontext()
+    return console.status(f"[cyan]✦ {message}[/cyan]", spinner="dots")
+
+
+def _demo_progress() -> Progress:
+    return Progress(
+        SpinnerColumn("dots", style="cyan"),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(bar_width=22, complete_style="magenta", finished_style="bright_cyan", pulse_style="blue"),
+        MofNCompleteColumn(),
+        console=console,
+        transient=False,
+        refresh_per_second=10,
+        disable=not console.is_terminal or bool(os.environ.get("NO_COLOR")),
+    )
 
 
 def version_callback(value: bool):
@@ -83,7 +134,7 @@ def main(
 @app.command()
 def doctor():
     """Validates the local environment, Python runtime, configuration, and SQLite storage."""
-    table = Table(title="NetCoop System Doctor")
+    table = make_table(title="NetCoop System Doctor")
     table.add_column("Component", style="bold")
     table.add_column("Status", style="green")
     table.add_column("Details")
@@ -223,13 +274,11 @@ def ingest(
 ):
     """Loads, normalizes, and extracts derived features from a telemetry file."""
     loader = TelemetryLoader()
-    console.print(f"[bold]Ingesting:[/bold] {file_path} for incident [cyan]{incident_id}[/cyan]...")
-
-    batch = loader.load_file(file_path, incident_id=incident_id)
-
-    # Run feature extraction pipeline
-    pipeline = FeaturePipeline()
-    features = pipeline.extract_features(batch.observations, incident_id=incident_id)
+    console.print(f"[bold cyan]Telemetry intake[/bold cyan]  {file_path}  [dim]·[/dim]  [cyan]{incident_id}[/cyan]")
+    with _soft_status("Normalizing telemetry and extracting features"):
+        batch = loader.load_file(file_path, incident_id=incident_id)
+        pipeline = FeaturePipeline()
+        features = pipeline.extract_features(batch.observations, incident_id=incident_id)
 
     # Optional persistence into SQLite
     if db_path:
@@ -239,7 +288,7 @@ def ingest(
             repo.insert_observation(obs)
         console.print(f"[green]Persisted {len(batch.observations)} observations to SQLite at {db_path}[/green]")
 
-    table = Table(title=f"Ingestion & Feature Summary: {incident_id}")
+    table = make_table(title=f"Ingestion & Feature Summary: {incident_id}")
     table.add_column("Category", style="bold")
     table.add_column("Count", style="green")
     table.add_column("Details")
@@ -271,15 +320,12 @@ def _load_observations_from_target(
     incident_id: str | None = None,
     data_quality_warnings: list[str] | None = None,
     profile: NetworkProfile | None = None,
+    topology_path: Path | None = None,
 ) -> tuple[str, list[CanonicalObservation]]:
     """Loads telemetry and optional topology from a file or scenario directory."""
     loader = TelemetryLoader(profile=profile)
     observations: list[CanonicalObservation] = []
     resolved_inc_id = incident_id
-
-    def source_field(record: dict[str, Any], field_name: str, defaults: list[str]) -> Any:
-        names = profile.source_field_candidates(field_name) if profile else defaults
-        return next((record[name] for name in names if name in record and record[name] is not None), None)
 
     if target_path.is_dir():
         # Check for telemetry file
@@ -304,86 +350,15 @@ def _load_observations_from_target(
             if not resolved_inc_id and batch.observations:
                 resolved_inc_id = batch.observations[0].incident_id
 
-        # Check for topology.json
-        topo_file = target_path / "topology.json"
+        # An explicit sitemap overrides the capture folder's topology.json.
+        topo_file = topology_path or target_path / "topology.json"
         if topo_file.exists():
-            try:
-                with open(topo_file, "r", encoding="utf-8") as f:
-                    topo_data = json.load(f)
-                if not isinstance(topo_data, dict):
-                    raise ValueError("topology root must be a JSON object")
-            except (OSError, json.JSONDecodeError, ValueError) as exc:
-                topo_data = {}
-                if data_quality_warnings is not None:
-                    data_quality_warnings.append(f"topology.json: topology file ignored: {exc}")
-            version = topo_data.get("schema_version")
-            if version not in (None, "1.0") and data_quality_warnings is not None:
-                data_quality_warnings.append(
-                    f"topology.json: schema version {version!r} is not recognized; best-effort parsing used"
-                )
-            now = datetime.now(timezone.utc)
-            t_inc = resolved_inc_id or "INC-TOPOLOGY"
-            links = topo_data.get("links", [])
-            if not isinstance(links, list):
-                links = []
-                if data_quality_warnings is not None:
-                    data_quality_warnings.append("topology.json: links must be a list; links ignored")
-            for index, link in enumerate(links):
-                try:
-                    if not isinstance(link, dict):
-                        raise ValueError("link must be an object")
-                    source = source_field(link, "source_entity", ["source_entity"])
-                    target = source_field(link, "target_entity", ["target_entity"])
-                    if not source or not target:
-                        raise ValueError("link requires source_entity and target_entity")
-                    obs = TopologyObservation(
-                        observation_id=source_field(link, "link_id", ["link_id"]) or generate_id("TOPO"),
-                        incident_id=t_inc,
-                        source="topology_json",
-                        entity_id=profile.canonical_entity(source) if profile else source,
-                        source_entity=profile.canonical_entity(source) if profile else source,
-                        target_entity=profile.canonical_entity(target) if profile else target,
-                        relationship_type=(profile.canonical_relationship(
-                            str(source_field(link, "relationship_type", ["relationship_type", "link_type"]) or "connected_to")
-                        ) if profile else str(source_field(link, "relationship_type", ["relationship_type", "link_type"]) or "connected_to")),
-                        link_speed_mbps=source_field(link, "capacity_mbps", ["capacity_mbps"]),
-                        interface_name=source_field(link, "interface_name", ["source_interface", "interface_name"]),
-                        timestamp=now,
-                    )
-                    observations.append(obs)
-                except Exception as exc:
-                    if data_quality_warnings is not None:
-                        data_quality_warnings.append(f"topology.json: skipped link {index}: {exc}")
-            dependencies = topo_data.get("service_dependencies", [])
-            if not isinstance(dependencies, list):
-                dependencies = []
-                if data_quality_warnings is not None:
-                    data_quality_warnings.append("topology.json: service_dependencies must be a list; dependencies ignored")
-            for index, dependency in enumerate(dependencies):
-                if not isinstance(dependency, dict):
-                    if data_quality_warnings is not None:
-                        data_quality_warnings.append(f"topology.json: skipped service dependency {index}: expected object")
-                    continue
-                consumer = source_field(dependency, "consumer_entity", ["consumer_entity"])
-                provider = source_field(dependency, "provider_entity", ["provider_entity"])
-                if not consumer or not provider:
-                    if data_quality_warnings is not None:
-                        data_quality_warnings.append("topology.json: skipped service dependency missing consumer/provider")
-                    continue
-                observations.append(
-                    TopologyObservation(
-                        observation_id=f"DEP-{dependency.get('consumer_entity')}-{dependency.get('provider_entity')}-{dependency.get('dependency_type', 'unknown')}",
-                        incident_id=t_inc,
-                        source="topology_json",
-                        entity_id=profile.canonical_entity(consumer) if profile else consumer,
-                        source_entity=profile.canonical_entity(consumer) if profile else consumer,
-                        target_entity=profile.canonical_entity(provider) if profile else provider,
-                        relationship_type=(profile.canonical_relationship(
-                            str(source_field(dependency, "relationship_type", ["dependency_type", "relationship_type"]) or "depends_on")
-                        ) if profile else str(source_field(dependency, "relationship_type", ["dependency_type", "relationship_type"]) or "depends_on")),
-                        timestamp=now,
-                    )
-                )
+            observations.extend(_load_topology_file(
+                topo_file,
+                incident_id=resolved_inc_id or incident_id or "INC-TOPOLOGY",
+                profile=profile,
+                data_quality_warnings=data_quality_warnings,
+            ))
     else:
         batch = loader.load_file(target_path, incident_id=incident_id)
         observations.extend(batch.observations)
@@ -398,6 +373,14 @@ def _load_observations_from_target(
             )
         if not resolved_inc_id and batch.observations:
             resolved_inc_id = batch.observations[0].incident_id
+
+        if topology_path:
+            observations.extend(_load_topology_file(
+                topology_path,
+                incident_id=resolved_inc_id or incident_id or "INC-TOPOLOGY",
+                profile=profile,
+                data_quality_warnings=data_quality_warnings,
+            ))
 
     resolved_inc_id = resolved_inc_id or "INC-CLI-001"
 
@@ -515,6 +498,95 @@ def _load_observations_from_target(
     return resolved_inc_id, aligned
 
 
+def _load_topology_file(
+    topology_path: Path,
+    incident_id: str,
+    profile: NetworkProfile | None = None,
+    data_quality_warnings: list[str] | None = None,
+) -> list[TopologyObservation]:
+    """Load a standalone NetCoop topology sitemap using the capture-folder contract."""
+    def source_field(record: dict[str, Any], field_name: str, defaults: list[str]) -> Any:
+        names = profile.source_field_candidates(field_name) if profile else defaults
+        return next((record[name] for name in names if name in record and record[name] is not None), None)
+
+    try:
+        topo_data = json.loads(topology_path.read_text(encoding="utf-8"))
+        if not isinstance(topo_data, dict):
+            raise ValueError("topology root must be a JSON object")
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        if data_quality_warnings is not None:
+            data_quality_warnings.append(f"{topology_path}: topology file ignored: {exc}")
+        return []
+
+    if topo_data.get("schema_version") not in (None, "1.0") and data_quality_warnings is not None:
+        data_quality_warnings.append(
+            f"{topology_path}: schema version {topo_data['schema_version']!r} is not recognized; best-effort parsing used"
+        )
+    timestamp = datetime.now(timezone.utc)
+    observations: list[TopologyObservation] = []
+    links = topo_data.get("links", [])
+    if not isinstance(links, list):
+        links = []
+        if data_quality_warnings is not None:
+            data_quality_warnings.append(f"{topology_path}: links must be a list; links ignored")
+    for index, link in enumerate(links):
+        try:
+            if not isinstance(link, dict):
+                raise ValueError("link must be an object")
+            source = source_field(link, "source_entity", ["source_entity"])
+            target = source_field(link, "target_entity", ["target_entity"])
+            if not source or not target:
+                raise ValueError("link requires source_entity and target_entity")
+            relationship = source_field(link, "relationship_type", ["relationship_type", "link_type"]) or "connected_to"
+            link_id = source_field(link, "link_id", ["link_id"]) or generate_id("TOPO")
+            observations.append(TopologyObservation(
+                observation_id=str(link_id),
+                incident_id=incident_id,
+                source=str(topology_path),
+                entity_id=profile.canonical_entity(str(source)) if profile else str(source),
+                source_entity=profile.canonical_entity(str(source)) if profile else str(source),
+                target_entity=profile.canonical_entity(str(target)) if profile else str(target),
+                relationship_type=profile.canonical_relationship(str(relationship)) if profile else str(relationship),
+                link_speed_mbps=source_field(link, "capacity_mbps", ["capacity_mbps"]),
+                interface_name=source_field(link, "interface_name", ["source_interface", "interface_name"]),
+                timestamp=timestamp,
+            ))
+        except Exception as exc:
+            if data_quality_warnings is not None:
+                data_quality_warnings.append(f"{topology_path}: skipped link {index}: {exc}")
+
+    dependencies = topo_data.get("service_dependencies", [])
+    if not isinstance(dependencies, list):
+        dependencies = []
+        if data_quality_warnings is not None:
+            data_quality_warnings.append(f"{topology_path}: service_dependencies must be a list; dependencies ignored")
+    for index, dependency in enumerate(dependencies):
+        if not isinstance(dependency, dict):
+            if data_quality_warnings is not None:
+                data_quality_warnings.append(f"{topology_path}: skipped service dependency {index}: expected object")
+            continue
+        consumer = source_field(dependency, "consumer_entity", ["consumer_entity"])
+        provider = source_field(dependency, "provider_entity", ["provider_entity"])
+        if not consumer or not provider:
+            if data_quality_warnings is not None:
+                data_quality_warnings.append(f"{topology_path}: skipped service dependency {index}: missing consumer/provider")
+            continue
+        relationship = source_field(dependency, "relationship_type", ["dependency_type", "relationship_type"]) or "depends_on"
+        consumer_id = profile.canonical_entity(str(consumer)) if profile else str(consumer)
+        provider_id = profile.canonical_entity(str(provider)) if profile else str(provider)
+        observations.append(TopologyObservation(
+            observation_id=str(dependency.get("link_id") or f"DEP-{consumer_id}-{provider_id}-{relationship}"),
+            incident_id=incident_id,
+            source=str(topology_path),
+            entity_id=consumer_id,
+            source_entity=consumer_id,
+            target_entity=provider_id,
+            relationship_type=profile.canonical_relationship(str(relationship)) if profile else str(relationship),
+            timestamp=timestamp,
+        ))
+    return observations
+
+
 @app.command()
 def diagnose(
     target_path: Path = typer.Argument(
@@ -531,9 +603,42 @@ def diagnose(
     profile_path: Path | None = typer.Option(
         None, "--profile", help="Optional versioned network profile YAML", exists=True, readable=True
     ),
+    site: str | None = typer.Option(
+        None, "--site", help="Site identifier; loads config/profiles/<site>.yaml when present and tags the report."
+    ),
+    topology_path: Path | None = typer.Option(
+        None, "--topology", "--sitemap", exists=True, readable=True,
+        help="Optional standalone topology JSON; overrides topology.json inside a capture directory.",
+    ),
+    symptom: str | None = typer.Option(
+        None, "--symptom", help="Optional caller-reported concern; compared after diagnosis and never steers it."
+    ),
 ):
     """Executes end-to-end incident diagnosis across all 4 towers and the Evidence Release Gate."""
     data_quality_warnings: list[str] = []
+    if site is not None and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", site):
+        console.print("[bold red]Invalid site ID:[/bold red] use letters, numbers, dots, underscores, or hyphens.")
+        raise typer.Exit(code=2)
+    if symptom is not None and not symptom.strip():
+        console.print("[bold red]Invalid symptom:[/bold red] --symptom requires non-empty caller wording.")
+        raise typer.Exit(code=2)
+    if profile_path is None and site:
+        profile_candidates = [
+            Path("config/profiles") / f"{site}.yaml",
+            Path("config/profiles") / f"{site}.yml",
+        ]
+        site_profile = next((candidate for candidate in profile_candidates if candidate.is_file()), None)
+        if site_profile is not None:
+            profile_path = site_profile
+        else:
+            data_quality_warnings.append(
+                f"No profile registered for site {site}; using generic mappings. "
+                "Pass --profile or create this site profile to apply network-specific mappings."
+            )
+    if topology_path is None and site:
+        site_topology = Path("config/sites") / site / "topology.json"
+        if site_topology.is_file():
+            topology_path = site_topology
     try:
         network_profile = NetworkProfile.load(profile_path) if profile_path else None
         if network_profile:
@@ -543,7 +648,7 @@ def diagnose(
         raise typer.Exit(code=2)
     inc_id, observations = _load_observations_from_target(
         target_path, incident_id=incident_id, data_quality_warnings=data_quality_warnings,
-        profile=network_profile,
+        profile=network_profile, topology_path=topology_path,
     )
     if network_profile and network_profile.topology_completeness != "complete":
         data_quality_warnings.append(
@@ -578,9 +683,37 @@ def diagnose(
     )
 
     try:
-        report = runtime.run_incident(
-            inc_id, observations, data_quality_warnings=data_quality_warnings
-        )
+        if format_opt.lower() == "rich":
+            with _soft_status("Specialists are correlating evidence and checking the diagnosis"):
+                report = runtime.run_incident(
+                    inc_id, observations, data_quality_warnings=data_quality_warnings
+                )
+        else:
+            report = runtime.run_incident(
+                inc_id, observations, data_quality_warnings=data_quality_warnings
+            )
+        if site is not None:
+            report = report.model_copy(update={"site_id": site})
+            repo.insert_final_report(report)
+        if symptom is not None:
+            symptom_agent = SymptomReasoningAgent(llm_mode=llm)
+            if format_opt.lower() == "rich":
+                with _soft_status("Comparing caller wording with the published evidence"):
+                    symptom_addendum = symptom_agent.analyze(
+                        symptom=symptom,
+                        report=report,
+                        observations=observations,
+                        tower_reports=repo.get_tower_reports(inc_id),
+                    )
+            else:
+                symptom_addendum = symptom_agent.analyze(
+                    symptom=symptom,
+                    report=report,
+                    observations=observations,
+                    tower_reports=repo.get_tower_reports(inc_id),
+                )
+            report = report.model_copy(update={"symptom_reasoning": symptom_addendum})
+            repo.insert_final_report(report)
         gate_res = repo.get_gate_result(inc_id)
     except EvidenceGateRejectionError as e:
         console.print(f"[bold red]Evidence Release Gate Rejection:[/bold red] {e}")
@@ -593,7 +726,7 @@ def diagnose(
             output_path.write_text(output_text, encoding="utf-8")
             console.print(f"[green]Saved JSON report to {output_path}[/green]")
         else:
-            console.print(output_text)
+            sys.stdout.write(output_text + "\n")
         return
 
     if format_opt.lower() == "markdown":
@@ -602,23 +735,24 @@ def diagnose(
             output_path.write_text(output_text, encoding="utf-8")
             console.print(f"[green]Saved Markdown report to {output_path}[/green]")
         else:
-            console.print(output_text)
+            sys.stdout.write(output_text + "\n")
         return
 
     # Default: Rich Terminal Display
     console.print(
         Panel(
-            f"[bold cyan]NetCoop AI Diagnostic Synthesis[/bold cyan]\n"
-            f"Incident ID: [bold]{inc_id}[/bold] | LLM Mode: [bold]{llm}[/bold] | "
+            f"[bold cyan]✦ NetCoop AI · Diagnostic Synthesis ✦[/bold cyan]\n"
+            f"Incident ID: [bold]{inc_id}[/bold] | Site: [bold]{site or 'unspecified'}[/bold] | "
+            f"LLM Mode: [bold]{llm}[/bold] | "
             f"Gate Status: [{'green' if report.status != 'insufficient_evidence' else 'yellow'}]{report.status.upper()}[/]\n"
             f"Evaluated Observations: {len(observations)} | Verified Findings: {len(repo.get_findings(inc_id))}",
-            title="Incident Intake",
+            title="◈ Incident Intake",
             border_style="cyan",
         )
     )
 
     # 1. Tower Status Table
-    tower_table = Table(title="Domain Tower Diagnostic Summary")
+    tower_table = make_table(title="Domain Tower Diagnostic Summary")
     tower_table.add_column("Domain Tower", style="bold")
     tower_table.add_column("Status", style="green")
     tower_table.add_column("Findings", justify="right")
@@ -627,13 +761,13 @@ def diagnose(
 
     t_reports = repo.get_tower_reports(inc_id)
     for tr in t_reports:
-        key_obs = tr.findings[0].description if tr.findings else "Nominal telemetry"
+        key_obs = tr.findings[0].description[:44] if tr.findings else "Nominal telemetry"
         tower_table.add_row(
             tr.tower_id.value.title(),
             tr.status,
             str(len(tr.findings)),
             str(len(tr.hypotheses)),
-            key_obs[:60] + ("..." if len(key_obs) > 60 else ""),
+            key_obs + ("..." if tr.findings and len(tr.findings[0].description) > 44 else ""),
         )
     console.print(tower_table)
 
@@ -652,19 +786,64 @@ def diagnose(
 
     # 3. Final Diagnosis Panel
     status_style = "green" if report.status == "diagnosed" else "yellow"
+    confidence_filled = max(0, min(10, round(report.confidence * 10)))
+    confidence_bar = f"[magenta]{'▰' * confidence_filled}[/magenta][dim]{'▱' * (10 - confidence_filled)}[/dim]"
+    observed_text = ", ".join(report.observed_symptom_entities) or "No cited symptom entities"
+    predicted_text = ", ".join(report.inferred_affected_entities) or "No topology-based candidates"
     diagnosis_content = (
-        f"[bold]Suspected Primary Root Cause:[/bold]\n[bold {status_style}]{report.suspected_root_cause}[/bold {status_style}]\n\n"
-        f"[bold]Confidence Score:[/bold] {report.confidence:.2f}\n"
-        f"[bold]Affected Entities:[/bold] {', '.join(report.affected_devices) if report.affected_devices else 'None detected'}\n\n"
-        f"[bold]Recommended Remediation Actions:[/bold]\n"
+        f"[bold]Suspected primary cause[/bold]\n[bold {status_style}]{report.suspected_root_cause}[/bold {status_style}]\n\n"
+        f"[bold]Confidence[/bold]  {confidence_bar}  {report.confidence:.0%}\n\n"
+        f"[bold cyan]Observed symptoms[/bold cyan]  {observed_text}\n"
+        f"[bold magenta]Predicted impact[/bold magenta]  {predicted_text}\n"
+        f"[dim]Combined affected entities: {', '.join(report.affected_devices) if report.affected_devices else 'None detected'}[/dim]\n\n"
+        f"[bold]Recommended actions[/bold]\n"
         + "\n".join(f"  {i+1}. {a}" for i, a in enumerate(report.recommended_actions))
     )
-    console.print(Panel(diagnosis_content, title="Certified Case-Level Diagnosis", border_style=status_style))
+    console.print(Panel(
+        diagnosis_content, title="✦ Certified Diagnosis", border_style="cyan", padding=(1, 2)
+    ))
+
+    if report.path_triage:
+        triage_lines = [f"Status: {report.path_triage.status}"]
+        for item in report.path_triage.paths:
+            reachability = "reachable" if item.reachable is True else (
+                "not reachable in recorded topology" if item.reachable is False else "unknown"
+            )
+            route = " → ".join(item.path) or "No path returned"
+            triage_lines.append(f"{item.source_entity} → {item.target_entity}: {reachability} · {route}")
+            if item.warning:
+                triage_lines.append(f"  Note: {item.warning}")
+        triage_lines.extend(f"Limit: {item}" for item in report.path_triage.limitations)
+        console.print(Panel(
+            "\n".join(triage_lines), title="Supplemental Path Triage · Reachability is not causation",
+            border_style="magenta", padding=(1, 2),
+        ))
+
+    if report.symptom_reasoning:
+        reasoning = report.symptom_reasoning
+        symptom_content = (
+            f"Caller wording: {reasoning.reported_symptom}\n"
+            f"Comparison: [bold]{reasoning.status.upper()}[/bold]\n"
+            f"Analysis mode: {reasoning.agent_mode}\n"
+            f"Recognized categories: {', '.join(reasoning.recognized_domains) or 'none'}\n"
+            f"{reasoning.explanation}"
+        )
+        if reasoning.warnings:
+            symptom_content += "\n\n[yellow]Agent notes:[/yellow]\n" + "\n".join(
+                f"  • {warning}" for warning in reasoning.warnings
+            )
+        console.print(Panel(
+            symptom_content, title="Optional Symptom Cross-check · Post-diagnosis",
+            border_style="blue", padding=(1, 2),
+        ))
 
     if output_path:
         md_text = render_markdown_report(report, gate_result=gate_res)
         output_path.write_text(md_text, encoding="utf-8")
         console.print(f"[green]Saved summary report to {output_path}[/green]")
+
+
+app.command("triage")(diagnose)
 
 
 @app.command("profile-validate")
@@ -683,7 +862,7 @@ def profile_validate(
         console.print(f"[bold red]Invalid profile:[/bold red] {exc}")
         raise typer.Exit(code=2)
 
-    table = Table(title=f"Network Profile: {profile.display_name}")
+    table = make_table(title=f"Network Profile: {profile.display_name}")
     table.add_column("Check", style="bold")
     table.add_column("Result")
     table.add_row("Identity", f"{profile.profile_id} v{profile.version}")
@@ -914,7 +1093,7 @@ def scenarios(
         subprocess.run(cmd, check=True)
         console.print("[green]✓ All scenarios generated successfully![/green]\n")
 
-    table = Table(title="Available Benchmark Scenarios")
+    table = make_table(title="Available Benchmark Scenarios")
     table.add_column("Scenario Name", style="bold cyan")
     table.add_column("Category", style="magenta")
     table.add_column("Target Entity")
@@ -953,11 +1132,11 @@ def demo():
     )
 
     demo_scenarios = [
-        ("healthy", "Healthy Baseline", "Nominal operation without faults"),
-        ("link_congestion", "Link Congestion", "Sustained core link saturation and queue drops"),
-        ("weak_wifi", "Weak Wi-Fi", "Severe RF signal attenuation and frame drops"),
-        ("device_overload", "Device Overload", "Switch CPU saturation and processing drops"),
-        ("dns_failure", "DNS Resolver Failure", "DNS query timeouts and SERVFAIL error codes"),
+        ("healthy", "Healthy"),
+        ("link_congestion", "Congestion"),
+        ("weak_wifi", "Weak Wi-Fi"),
+        ("device_overload", "Overload"),
+        ("dns_failure", "DNS Failure"),
     ]
 
     # Ensure scenarios are generated
@@ -969,38 +1148,38 @@ def demo():
         cmd = [sys.executable, "reference/sample_generator.py", "--scenario", "all", "--output-dir", str(scenarios_dir)]
         subprocess.run(cmd, check=True)
 
-    results_table = Table(title="Demo Benchmark Execution Summary")
-    results_table.add_column("Scenario", style="bold")
-    results_table.add_column("Domain Tower", style="cyan")
-    results_table.add_column("Gate Outcome", style="green")
-    results_table.add_column("Diagnosed Root Cause")
-    results_table.add_column("Confidence", justify="right")
-    results_table.add_column("LLM Required")
+    results_table = make_table(title="Demo Benchmark Execution Summary")
+    results_table.add_column("Scenario", style="bold", no_wrap=True, max_width=12)
+    results_table.add_column("Gate", style="green", no_wrap=True, max_width=10)
+    results_table.add_column("Likely cause", no_wrap=True, overflow="ellipsis", max_width=34)
+    results_table.add_column("Conf.", justify="right", no_wrap=True, max_width=6)
 
-    for sc_name, title, desc in demo_scenarios:
-        sc_path = scenarios_dir / sc_name
-        inc_id, observations = _load_observations_from_target(sc_path)
+    progress = _demo_progress()
+    with progress:
+        task_id = progress.add_task("Preparing incident runs", total=len(demo_scenarios))
+        for sc_name, title in demo_scenarios:
+            progress.update(task_id, description=f"Diagnosing {title.lower()}")
+            sc_path = scenarios_dir / sc_name
+            inc_id, observations = _load_observations_from_target(sc_path)
 
-        repo = SQLiteRepository(":memory:")
-        fabric = IntegrationFabric(repository=repo)
-        gate = EvidenceReleaseGate(repository=repo)
-        rca_agent = SupervisoryRCAAgent(provider=DeterministicRCAProvider())
-        runtime = SupervisorRuntime(fabric=fabric, repository=repo, rca_agent=rca_agent, gate=gate)
+            repo = SQLiteRepository(":memory:")
+            fabric = IntegrationFabric(repository=repo)
+            gate = EvidenceReleaseGate(repository=repo)
+            rca_agent = SupervisoryRCAAgent(provider=DeterministicRCAProvider())
+            runtime = SupervisorRuntime(fabric=fabric, repository=repo, rca_agent=rca_agent, gate=gate)
 
-        report = runtime.run_incident(inc_id, observations)
-        gate_res = repo.get_gate_result(inc_id)
+            report = runtime.run_incident(inc_id, observations)
+            gate_res = repo.get_gate_result(inc_id)
 
-        outcome_text = gate_res.outcome.value.upper() if gate_res else "UNKNOWN"
-        domain_str = "All (Nominal)" if sc_name == "healthy" else sc_name.replace("_", " ").title()
-
-        results_table.add_row(
-            title,
-            domain_str,
-            f"[{'green' if outcome_text == 'PASS' else 'yellow'}]{outcome_text}[/]",
-            report.suspected_root_cause[:55] + "...",
-            f"{report.confidence:.2f}",
-            "[green]No (0 calls)[/green]",
-        )
+            outcome_text = gate_res.outcome.value.upper() if gate_res else "UNKNOWN"
+            outcome_label = "PASS+NOTES" if outcome_text == "PASS_WITH_LIMITATIONS" else outcome_text
+            results_table.add_row(
+                title,
+                f"[{'green' if outcome_text == 'PASS' else 'yellow'}]{outcome_label}[/]",
+                report.suspected_root_cause,
+                f"{report.confidence:.0%}",
+            )
+            progress.advance(task_id)
 
     console.print(results_table)
     console.print(
@@ -1033,7 +1212,7 @@ def inspect(
 
     # 1. Findings table
     findings = repo.get_findings(inc_id)
-    table_findings = Table(title=f"Persisted Findings ({len(findings)})")
+    table_findings = make_table(title=f"Persisted Findings ({len(findings)})")
     table_findings.add_column("Finding ID", style="bold")
     table_findings.add_column("Tower", style="cyan")
     table_findings.add_column("Finding Type")

@@ -197,14 +197,24 @@ def test_service_diagnoses_record_real_services_to_connectivity_peer_query(scena
     report = SupervisorRuntime().run_incident(incident_id, observations)
 
     assert report.status == "diagnosed"
-    assert len(report.peer_interactions) == 1
-    interaction = report.peer_interactions[0]
+    service_interactions = [
+        item for item in report.peer_interactions
+        if item["requester"] == "services" and not item.get("supplementary")
+    ]
+    supplemental_interactions = [
+        item for item in report.peer_interactions if item.get("supplementary")
+    ]
+    assert len(service_interactions) == 1
+    assert len(supplemental_interactions) == 1
+    interaction = service_interactions[0]
     assert interaction["requester"] == "services"
     assert interaction["recipient"] == "connectivity"
     assert interaction["capability"] == "connectivity.trace_path"
     assert interaction["scope"] == expected_scope
     assert interaction["status"] == "completed"
     assert interaction["result"]["reachable"] is True
+    assert supplemental_interactions[0]["requester"] == "supervisor"
+    assert supplemental_interactions[0]["result"]["reachable"] is True
 
 
 def test_report_separates_entities_with_cited_symptoms_from_predicted_impact():
@@ -258,9 +268,13 @@ def test_service_peer_query_reports_unknown_for_missing_path_in_unknown_topology
     ).run_incident(incident_id, observations)
 
     assert report.status == "diagnosed"
-    assert len(report.peer_interactions) == 1
-    assert report.peer_interactions[0]["result"]["reachable"] is None
-    assert "unknown" in report.peer_interactions[0]["result"]["warning"]
+    path_interactions = [
+        item for item in report.peer_interactions
+        if item["capability"] == "connectivity.trace_path"
+    ]
+    assert len(path_interactions) == 2
+    assert all(item["result"]["reachable"] is None for item in path_interactions)
+    assert all("unknown" in item["result"]["warning"] for item in path_interactions)
 
 
 def test_generated_compound_dns_and_congestion_preserves_both_causes(tmp_path: Path):

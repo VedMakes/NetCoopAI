@@ -17,7 +17,7 @@ from netcoop.models.enums import ConfidenceCategory, ProposalDecision, TowerId
 from netcoop.models.findings import Finding
 from netcoop.models.hypotheses import Hypothesis
 from netcoop.models.observations import TopologyObservation
-from netcoop.models.reports import ClaimEvidenceManifest, FinalReport, TowerReport
+from netcoop.models.reports import ClaimEvidenceManifest, FinalReport, PathTriage, TowerReport
 from netcoop.supervisor.agent import SupervisoryRCAAgent
 from netcoop.supervisor.gate import EvidenceReleaseGate
 from netcoop.supervisor.models import (
@@ -26,6 +26,7 @@ from netcoop.supervisor.models import (
     IncidentLifecycleState,
     InvestigationBudget,
 )
+from netcoop.supervisor.supplementary import build_path_triage
 from netcoop.utils.id_generator import generate_id
 
 if TYPE_CHECKING:
@@ -265,6 +266,7 @@ class SupervisorRuntime:
                 limitations=["Supervisor abstained due to ambiguity or insufficient evidence."],
                 generated_at=proposal.created_at,
             )
+            report = self._add_path_triage(report, incident_id, observations)
             if self.repo is not None:
                 self.repo.insert_final_report(report)
             return report
@@ -280,11 +282,32 @@ class SupervisorRuntime:
         # Publication verified
         self.state = IncidentLifecycleState.PUBLISHED
         final_report = gate_result.certified_final_report
+        final_report = self._add_path_triage(final_report, incident_id, observations)
 
         if self.repo is not None:
             self.repo.insert_final_report(final_report)
 
         return final_report
+
+    def _add_path_triage(
+        self, report: FinalReport, incident_id: str, observations: list[CanonicalObservation]
+    ) -> FinalReport:
+        """Attach topology context after gate publication without revising its claims."""
+        try:
+            triage, interactions, warnings = build_path_triage(
+                report, incident_id, observations, self.fabric
+            )
+            return report.model_copy(update={
+                "path_triage": triage,
+                "peer_interactions": [*report.peer_interactions, *interactions],
+                "orchestration_warnings": [*report.orchestration_warnings, *warnings],
+            })
+        except Exception as exc:  # The supplemental path view must never block diagnosis.
+            triage = PathTriage(
+                status="unavailable",
+                limitations=[f"Supplementary path triage failed safely: {exc}"],
+            )
+            return report.model_copy(update={"path_triage": triage})
 
     def _build_dossier(
         self,

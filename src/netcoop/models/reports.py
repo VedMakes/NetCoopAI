@@ -1,7 +1,7 @@
 """Report and proposal models for tower outputs, supervisor proposals, and final diagnostic deliverables."""
 
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -88,6 +88,44 @@ class SupportingEvidenceItem(BaseModel):
     source: str | None = None
 
 
+class PathTraceItem(BaseModel):
+    """Supplemental topology route trace; reachability is not a causal claim."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_entity: str
+    target_entity: str
+    reachable: bool | None
+    path: list[str] = Field(default_factory=list)
+    evidence_refs: list[str] = Field(default_factory=list)
+    warning: str | None = None
+
+
+class PathTriage(BaseModel):
+    """Post-diagnosis path context, separate from the root-cause decision."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["traced", "partial", "unavailable"]
+    paths: list[PathTraceItem] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+
+
+class SymptomReasoning(BaseModel):
+    """Optional, rule-based comparison of a caller's words with a diagnosis."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    reported_symptom: str
+    status: Literal["aligned", "mismatch", "unclear"]
+    recognized_domains: list[str] = Field(default_factory=list)
+    diagnosed_fault_codes: list[str] = Field(default_factory=list)
+    matched_fault_codes: list[str] = Field(default_factory=list)
+    explanation: str
+    agent_mode: Literal["deterministic", "llm", "deterministic_fallback"] = "deterministic"
+    warnings: list[str] = Field(default_factory=list)
+
+
 class FinalReport(BaseModel):
     """Official competition diagnostic JSON report meeting Challenge Brief Section 6 requirements."""
 
@@ -110,6 +148,9 @@ class FinalReport(BaseModel):
     data_quality_warnings: list[str] = Field(default_factory=list)
     orchestration_warnings: list[str] = Field(default_factory=list)
     peer_interactions: list[dict[str, Any]] = Field(default_factory=list)
+    path_triage: PathTriage | None = None
+    symptom_reasoning: SymptomReasoning | None = None
+    site_id: str | None = None
     network_profile: dict[str, str] | None = None
     generated_at: datetime
 
