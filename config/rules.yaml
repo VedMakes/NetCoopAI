@@ -58,3 +58,34 @@ infrastructure:
     - "reset"
     - "drop"
 
+connectivity:
+  reachability_hop_limit: 15
+  isolated_subgraph_min_nodes: 1
+  path_failure_loss_threshold_pct: 100.0
+
+services:
+  dns_latency_warning_ms: 150.0
+  dns_latency_critical_ms: 500.0
+  dns_error_keywords:
+    - "SERVFAIL"
+    - "NXDOMAIN"
+    - "REFUSED"
+    - "TIMEOUT"
+    - "dns_failure"
+  dhcp_error_keywords:
+    - "exhausted"
+    - "timeout"
+    - "nak"
+    - "pool_full"
+    - "dhcp_failure"
+  config_sensitive_keys:
+    - "mtu"
+    - "vlan"
+    - "speed"
+    - "duplex"
+    - "route"
+    - "gateway"
+    - "acl"
+    - "dns"
+
+

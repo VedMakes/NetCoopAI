@@ -607,6 +607,167 @@ All Phase 2 tasks and acceptance criteria have been verified independently:
 
 ---
 
+## Phase 3 review
+
+- Date/time (ISO 8601): 2026-10-31T13:20:00Z
+- Reviewer: Friend A
+- Implementation owner: Friend B
+- Commit reviewed: `29419bb` (and formatting commits up to `5f00989`)
+- Status: `VERIFIED`
+
+### Independent checks
+
+| Command/check | Result | Notes |
+|---|---|---|
+| Diff inspection | PASS | Clean deterministic engines for Performance and Infrastructure with zero LLM calls |
+| Focused tests | PASS | Tests in `test_towers_performance.py` and `test_towers_infrastructure.py` passed |
+| Full tests | PASS | 93 of 93 passed in 0.61s (`pytest -v`) |
+| Linter check | PASS | `ruff check .` clean |
+| Congestion escalation check | PASS | High utilization alone does NOT trigger `LINK_CONGESTION` hypothesis |
+| Log deduplication check | PASS | Identical error messages on same entity within window deduplicated |
+| Provenance verification | PASS | All generated findings and hypotheses link valid `evidence_refs` |
+
+### Findings
+
+- `[BLOCKER]` None
+- `[MAJOR]` None
+- `[MINOR]` None
+- `[NIT]` None
+
+### Verdict rationale
+
+All Phase 3 exit criteria are thoroughly satisfied:
+1. `PerformanceEngine` accurately identifies link congestion (when high utilization is paired with queue drops, loss, or latency spikes) and weak Wi-Fi degradation, while strictly treating high utilization alone as a non-fault capacity notice.
+2. `InfrastructureEngine` reliably detects device overload (CPU/memory pressure) and interface faults (packet errors, link flaps), and parses/deduplicates error logs.
+3. Both engines and tower controllers operate 100% deterministically without LLM calls or API key requirements.
+4. Observation provenance is preserved across all findings and hypotheses.
+5. All 93 unit tests pass cleanly.
+
+### Next phase authorization
+
+- Next phase: Phase 4: Connectivity and services/configuration engines
+- Next owner: Friend A
+- Authorized to start: YES
+
+---
+
+## Phase 4 implementation handoff: Connectivity and services/configuration engines
+
+- Date/time (ISO 8601): 2026-10-31T13:25:00Z
+- Implementation owner: Friend A
+- Assigned reviewer: Friend B
+- Branch: `hackathon/team-integration`
+- Base commit SHA: `5f00989`
+- Result commit SHA: (pending commit)
+- Status: `AWAITING_REVIEW`
+
+### Scope completed
+
+- Verified session designation: `TEAMMATE_ID = A` (Friend A).
+- Implemented Connectivity and Topology Subsystem in `src/netcoop/towers/connectivity.py`:
+  - `TopologyGraph`: in-memory NetworkX graph built from canonical `TopologyObservation`s.
+  - Implemented `trace_path(source, target)` with hop counting, link speed/interface details, and strict non-fabrication of paths for missing or disconnected entities.
+  - Implemented `find_common_uplink(entities)` to locate nearest shared upstream dependency (e.g. shared distribution switch for degraded access points).
+  - Implemented `query_neighbors(entity_id)` for topological neighborhood inspection.
+  - Implemented `analyze_blast_radius(failed_entity)` to calculate entities that lose reachability to the backbone when a node or link fails.
+  - Implemented `ConnectivityEngine`: detects partitioned topology graphs (`path_interruption` finding, `ROUTING_FAILURE` hypothesis) and correlates multi-entity degradation to shared upstream chokepoints (`uplink_saturation` finding).
+  - Implemented `ConnectivityTower`: controller implementing `TowerController`, transactional SQLite persistence, peer queries (`connectivity.trace_path`, `connectivity.find_common_uplink`, `connectivity.query_neighbors`, `connectivity.analyze_blast_radius`), and investigation task handling (`INVESTIGATE_TOPOLOGY`, `ANALYZE_REACHABILITY`).
+- Implemented Services and Configuration Subsystem in `src/netcoop/towers/services.py`:
+  - `ServicesEngine`:
+    - DNS resolution analysis: detects DNS latency spikes ($\ge 150\text{ms}$ warning, $\ge 500\text{ms}$ critical) and error logs (SERVFAIL, NXDOMAIN, REFUSED, TIMEOUT); emits `dns_resolution_failure` finding and `DNS_FAILURE` hypothesis.
+    - DHCP analysis: detects lease exhaustion, NAKs, and pool exhaustion events; emits `dhcp_lease_exhaustion` finding and `DHCP_FAILURE` hypothesis.
+    - Configuration drift analysis: correlates sensitive configuration changes (MTU, VLAN, speed, routing, ACL) with incident anomalies; emits `config_drift_detected` finding and `CONFIG_DRIFT` hypothesis.
+    - Enforced normal telemetry produces 0 severe findings / hypotheses.
+  - `ServicesTower`: controller implementing `TowerController`, transactional SQLite persistence, peer queries (`services.check_dns`, `services.check_dhcp`, `services.query_config_drift`), and investigation task handling (`INVESTIGATE_DNS`, `INVESTIGATE_DHCP`, `ANALYZE_CONFIG_DRIFT`).
+- Config & rules:
+  - Added `connectivity` and `services` thresholds and pattern configs in `config/rules.yaml`.
+- Module exports:
+  - Updated `src/netcoop/towers/__init__.py` to export `ConnectivityEngine`, `ConnectivityTower`, `TopologyGraph`, `ServicesEngine`, and `ServicesTower`.
+- Comprehensive Unit Test Suite (14 new unit tests, 107 total tests passing):
+  - `tests/unit/test_towers_connectivity.py` (8 tests)
+  - `tests/unit/test_towers_services.py` (6 tests)
+- Zero LLM dependencies: all connectivity and services analysis is 100% deterministic.
+
+### Files changed
+
+- `config/rules.yaml`: Added connectivity and services rules.
+- `src/netcoop/towers/__init__.py`: Exported new engines and controllers.
+- `src/netcoop/towers/connectivity.py`: Connectivity engine, NetworkX topology graph, and controller.
+- `src/netcoop/towers/services.py`: Services engine and controller.
+- `tests/unit/test_towers_connectivity.py`: Topology and connectivity test suite.
+- `tests/unit/test_towers_services.py`: Services and config test suite.
+- `docs/COLLAB_LOG.md`: Phase 3 review and Phase 4 handoff.
+- `COLLAB_LOG.md`: Root mirror of collab log.
+- `docs/PHASE_STATUS.md`: Phase 4 status.
+- `PHASE_STATUS.md`: Root mirror of phase status.
+
+### Tests and commands actually run
+
+| Command | Result | Notes |
+|---|---|---|
+| `.venv/bin/pytest -v` | PASS | 107 of 107 unit tests passed in 0.79s |
+| `.venv/bin/ruff check .` | PASS | Clean, 0 errors |
+| `.venv/bin/netcoop doctor` | PASS | All 4 components OK |
+| `.venv/bin/netcoop validate fixtures/sample_incident.json` | PASS | 9/9 observations validated |
+| `.venv/bin/netcoop ingest fixtures/sample_incident.json` | PASS | Ingestion and features validated |
+
+### Evidence of behavior
+
+Running pytest:
+```text
+tests/unit/test_towers_connectivity.py::test_topology_graph_construction_and_path PASSED
+tests/unit/test_towers_connectivity.py::test_topology_graph_refuses_to_invent_missing_path PASSED
+tests/unit/test_towers_connectivity.py::test_common_upstream_dependency_identification PASSED
+tests/unit/test_towers_connectivity.py::test_neighbors_and_blast_radius PASSED
+tests/unit/test_towers_connectivity.py::test_connectivity_engine_partition_detection PASSED
+tests/unit/test_towers_connectivity.py::test_connectivity_engine_common_uplink_correlation PASSED
+tests/unit/test_towers_connectivity.py::test_connectivity_tower_controller_and_sqlite PASSED
+tests/unit/test_towers_connectivity.py::test_connectivity_peer_queries_and_tasks PASSED
+tests/unit/test_towers_services.py::test_dns_resolution_failure_detected PASSED
+tests/unit/test_towers_services.py::test_dhcp_pool_exhaustion_detected PASSED
+tests/unit/test_towers_services.py::test_config_drift_detected PASSED
+tests/unit/test_towers_services.py::test_normal_services_telemetry_causes_no_faults PASSED
+tests/unit/test_towers_services.py::test_services_tower_controller_and_sqlite PASSED
+tests/unit/test_towers_services.py::test_services_peer_queries_and_tasks PASSED
+============================= 107 passed in 0.79s ==============================
+```
+
+### Deviations and decisions
+
+- Decision record references: None required; contracts remained completely stable.
+- Public contract changes: None.
+- Architecture deviations: None.
+
+### Known issues / unverified areas
+
+- None.
+
+### Reviewer checklist
+
+- [ ] Inspect git diff and verify zero LLM calls in diagnostic engines.
+- [ ] Run `pytest -v` independently (107 tests passing).
+- [ ] Run `ruff check .` independently.
+- [ ] Verify common upstream dependency calculation with multiple endpoints.
+- [ ] Verify missing topology does not invent paths.
+- [ ] Verify DNS failure distinction and configuration drift detection.
+- [ ] Verify Phase 4 exit criteria.
+
+### Next phase
+
+- Phase: Phase 5: Integration fabric and tower controllers
+- Owner: Friend B
+- Reviewer: Friend A
+
+---
+
+## Phase 4 review
+
+> Friend B appends the review verdict here after independently verifying Friend A's commit.
+
+_Status: NOT STARTED_
+
+---
+
 ## Subsequent phases
 
 Append each implementation handoff and its review after the preceding phase has been verified. Do not replace this section with a rewritten summary.
