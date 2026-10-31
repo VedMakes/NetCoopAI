@@ -4,7 +4,56 @@ New entries are appended at the top.
 
 ---
 
-## [Phase 0] - Repository Audit and Frontend Branch Establishment
+## [Phase 2] - Backend Integration & API Foundation
+- **Date:** 2026-11-01
+- **Phase:** PHASE 2
+- **Owner:** Senior Engineering Partner
+- **Starting commit:** `9d20a09`
+- **Summary:**
+  - Implemented the thin FastAPI backend HTTP service layer (`src/netcoop_api/`) wrapping existing `SupervisorRuntime`, `TelemetryLoader`, `FeaturePipeline`, and SQLite store with zero duplicated diagnostic logic.
+  - Implemented structured execution event sink and Server-Sent Events (SSE) broadcaster (`src/netcoop_api/events.py`) supporting live event streaming (`/api/runs/{id}/events/stream`) and automatic post-completion playback.
+  - Implemented application run coordinator (`src/netcoop_api/service.py`) supporting asynchronous background execution of scenario and custom capture runs.
+  - Implemented read-only Incident Explanation Assistant service (`src/netcoop_api/assistant.py`) supporting grounded deterministic explanations and optional OpenRouter integration with zero RAG.
+  - Implemented endpoints: `/api/health`, `/api/scenarios`, `/api/scenarios/{id}`, `/api/scenarios/{id}/topology`, `/api/runs`, `/api/runs/{id}`, `/api/runs/{id}/telemetry`, `/api/runs/{id}/topology`, `/api/runs/{id}/events`, `/api/runs/{id}/events/stream`, `/api/runs/{id}/findings`, `/api/runs/{id}/tasks`, `/api/runs/{id}/report`, `/api/runs/{id}/evaluation`, `/api/runs/{id}/assistant`.
+  - Enforced strict ground truth isolation: ground truth is never accessible to towers, supervisor, or the assistant; evaluation is blocked until diagnosis completes.
+  - Added CLI command `netcoop api` in `src/netcoop/cli/main.py`.
+  - Authored comprehensive API integration test suite in `tests/unit/test_api.py`.
+  - Authored `docs/FRONTEND_API_CONTRACT.md`.
+- **Files created/modified:**
+  - Created `src/netcoop_api/__init__.py`
+  - Created `src/netcoop_api/app.py`
+  - Created `src/netcoop_api/schemas.py`
+  - Created `src/netcoop_api/events.py`
+  - Created `src/netcoop_api/service.py`
+  - Created `src/netcoop_api/assistant.py`
+  - Created `src/netcoop_api/routes/health.py`
+  - Created `src/netcoop_api/routes/scenarios.py`
+  - Created `src/netcoop_api/routes/runs.py`
+  - Created `src/netcoop_api/routes/assistant.py`
+  - Created `tests/unit/test_api.py`
+  - Created `docs/FRONTEND_API_CONTRACT.md`
+  - Modified `src/netcoop/cli/main.py` (added `api` command)
+  - Modified `pyproject.toml` (added `fastapi`, `uvicorn`, `httpx`, packaged `src/netcoop_api`)
+  - Modified `uv.lock`
+- **API/schema changes:**
+  - Full REST and SSE API operational under `/api/*`.
+- **Dependencies added:**
+  - Runtime: `fastapi>=0.110.0`, `uvicorn>=0.29.0`
+  - Dev: `httpx>=0.27.0`
+- **Tests run and actual results:**
+  - `uv run pytest -q`: **220 passed** (all 214 existing tests + 6 new API tests).
+  - `uv run ruff check .`: Clean, 0 errors.
+  - `git diff --check`: Clean, 0 whitespace issues.
+- **Tests not run:** None.
+- **CLI regression results:**
+  - `uv run netcoop doctor`: PASS.
+  - `uv run netcoop scenarios`: PASS.
+  - `uv run netcoop demo`: PASS.
+  - `uv run netcoop api --help`: PASS.
+- **Known issues:** None.
+- **Ending commit:** `a6d0331`
+- **Push verification:** Pushed and verified at `origin/feature/netcoop-dashboard` (commit `a6d0331`).
+- **Next phase:** PHASE 3 — Frontend foundation and Page 1: Network Simulation & Topology.
 - **Date:** 2026-11-01
 - **Phase:** PHASE 0
 - **Owner:** Senior Engineering Partner

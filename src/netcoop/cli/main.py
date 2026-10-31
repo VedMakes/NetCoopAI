@@ -1289,5 +1289,17 @@ def inspect(
         console.print("[yellow]No final report recorded for this incident yet.[/yellow]")
 
 
+@app.command()
+def api(
+    host: str = typer.Option("127.0.0.1", "--host", "-h", help="Bind host"),
+    port: int = typer.Option(8000, "--port", "-p", help="Bind port"),
+    reload: bool = typer.Option(False, "--reload", help="Enable auto-reload for development"),
+):
+    """Starts the NetCoop AI backend HTTP API and event streaming service."""
+    import uvicorn
+    console.print(f"[bold cyan]Starting NetCoop AI API on http://{host}:{port}[/bold cyan]")
+    uvicorn.run("netcoop_api.app:create_app", host=host, port=port, reload=reload, factory=True)
+
+
 if __name__ == "__main__":
     app()
