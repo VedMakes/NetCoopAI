@@ -98,6 +98,7 @@ class FinalReport(BaseModel):
     suspected_root_cause: str
     confidence: float = Field(..., ge=0.0, le=1.0)
     affected_devices: list[str] = Field(default_factory=list)
+    observed_symptom_entities: list[str] = Field(default_factory=list)
     supporting_evidence: list[SupportingEvidenceItem] = Field(default_factory=list)
     alternative_causes: list[str] = Field(default_factory=list)
     recommended_actions: list[str] = Field(default_factory=list)

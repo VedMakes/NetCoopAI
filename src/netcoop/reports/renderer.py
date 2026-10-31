@@ -22,7 +22,7 @@ def render_markdown_report(report: FinalReport, gate_result: Any | None = None) 
         "",
         f"**Primary Suspected Root Cause:** `{report.suspected_root_cause}`",
         "",
-        "**Affected Entities & Devices:**",
+        "**Affected entities (direct findings plus topology inference):**",
     ]
 
     if report.affected_devices:
@@ -31,12 +31,21 @@ def render_markdown_report(report: FinalReport, gate_result: Any | None = None) 
     else:
         lines.append("- None detected / not applicable")
 
+    lines.extend(["", "**Entities with cited symptom evidence:**"])
+    if report.observed_symptom_entities:
+        lines.extend(f"- `{entity}`" for entity in report.observed_symptom_entities)
+    else:
+        lines.append("- None identified from cited observations")
+
     if report.concurrent_causes:
         lines.extend(["", "**Concurrent suspected causes:**"])
         lines.extend(f"- {cause}" for cause in report.concurrent_causes)
 
     if report.inferred_affected_entities:
-        lines.extend(["", "**Inferred affected entities (from topology):**"])
+        lines.extend([
+            "", "**Predicted affected entities (inferred from topology):**",
+            "These are predicted impact candidates, not confirmed user impact.",
+        ])
         lines.extend(f"- `{entity}`" for entity in report.inferred_affected_entities)
 
     if report.network_profile:

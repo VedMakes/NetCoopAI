@@ -128,6 +128,7 @@ class EvidenceReleaseGate:
                 suspected_root_cause=f"ABSTAIN: {proposal.abstain_reason or 'Insufficient diagnostic evidence'}",
                 confidence=0.0,
                 affected_devices=proposal.affected_entities,
+                observed_symptom_entities=[],
                 supporting_evidence=[],
                 alternative_causes=proposal.alternative_causes,
                 recommended_actions=proposal.recommended_actions,
@@ -378,6 +379,9 @@ class EvidenceReleaseGate:
                 confidence=num_conf,
                 affected_devices=list(dict.fromkeys(
                     proposal.affected_entities + _infer_affected_entities(proposal.affected_entities, observations_for_impact)
+                )),
+                observed_symptom_entities=list(dict.fromkeys(
+                    item.entity_id for item in evidence_items if item.entity_id
                 )),
                 inferred_affected_entities=_infer_affected_entities(proposal.affected_entities, observations_for_impact),
                 supporting_evidence=evidence_items,

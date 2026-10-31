@@ -207,6 +207,16 @@ def test_service_diagnoses_record_real_services_to_connectivity_peer_query(scena
     assert interaction["result"]["reachable"] is True
 
 
+def test_report_separates_entities_with_cited_symptoms_from_predicted_impact():
+    incident_id, observations = _load_observations_from_target(SCENARIOS_DIR / "dns_failure")
+    report = SupervisorRuntime().run_incident(incident_id, observations)
+
+    assert "SRV_DNS_01" in report.observed_symptom_entities
+    assert "HOSTEL_ZONE_A" in report.inferred_affected_entities
+    assert set(report.observed_symptom_entities) <= set(report.affected_devices)
+    assert set(report.inferred_affected_entities) <= set(report.affected_devices)
+
+
 def test_compound_dns_and_dhcp_incident_queries_each_declared_service_dependency():
     observations = []
     for scenario_name in ("dns_failure", "dhcp_failure"):

@@ -2,7 +2,7 @@
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Tests: 192 passed](https://img.shields.io/badge/tests-192%20passed-brightgreen.svg)]()
+[![Tests: 193 passed](https://img.shields.io/badge/tests-193%20passed-brightgreen.svg)]()
 [![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
 
 **NetCoop AI** is an autonomous multi-agent cooperative network diagnostic platform engineered to triage, correlate, and determine root causes for campus and enterprise network incidents.
@@ -183,6 +183,10 @@ The repository includes pre-built synthetic network incident scenarios in `fixtu
 
 The included generator is useful for deterministic regression checks, not a representative estimate of real-world accuracy. It emits seven presets from one fixed campus topology, with one injected fault class per run and a narrow synthetic observation schema. The challenge brief also calls out incomplete, inconsistent, outdated, noisy, and incompatible telemetry, but these dimensions are not systematically represented by those presets. The current 21/21 multi-seed score is therefore an in-domain regression result, not a real-world accuracy estimate. We add metamorphic and adversarial probes (mixed faults, sparse windows, malformed exports, unknown topology, alternate names/units/fields) and report their results separately; synthetic transformations still do not replace evaluation against authorized production-like captures or independent network simulators.
 
+### Impact reporting
+
+The JSON report keeps `affected_devices` as a compatibility union, and now separates `observed_symptom_entities` (entities with cited telemetry/log evidence) from `inferred_affected_entities` (topology-based impact candidates). Inferred entities are predictions, not confirmed user impact; runtime diagnosis does not know the ground-truth affected set. On the 21 generated cases, the union compared with the generator's `intended_affected_entities` has 84.6% micro precision, 73.3% recall, 78.6% F1, and exact set agreement in 12/21 cases. These figures measure agreement with the generator's intended impact annotations, not independently observed outcomes.
+
 ---
 
 ## Testing & Quality Assurance
@@ -190,7 +194,7 @@ The included generator is useful for deterministic regression checks, not a repr
 NetCoop AI maintains a rigorous test suite covering contracts, ingestion, feature engineering, SQLite persistence, inter-agent fabric, specialist towers, supervisory reasoning, evidence gate, and CLI operations:
 
 ```bash
-# Run all 192 tests
+# Run all 193 tests
 uv run pytest -v
 
 # Evaluate the repository's synthetic generator across multiple deterministic seeds

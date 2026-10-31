@@ -27,6 +27,7 @@ def main() -> None:
     confusion: dict[str, Counter[str]] = defaultdict(Counter)
     target_correct = 0
     total = 0
+    impact_tp = impact_fp = impact_fn = impact_exact = 0
 
     with tempfile.TemporaryDirectory(prefix="netcoop-eval-") as temp_dir:
         root = Path(temp_dir)
@@ -54,10 +55,27 @@ def main() -> None:
                 target = truth.get("target_entity")
                 if actual == "ABSTAIN" or (target and target in report.affected_devices):
                     target_correct += 1
+                expected_impact = set(truth.get("intended_affected_entities", []))
+                reported_impact = set(report.affected_devices)
+                impact_tp += len(expected_impact & reported_impact)
+                impact_fp += len(reported_impact - expected_impact)
+                impact_fn += len(expected_impact - reported_impact)
+                impact_exact += expected_impact == reported_impact
 
     exact = sum(confusion[label][label] for label in labels.values())
     print(f"Cases: {total}; exact class accuracy: {exact}/{total} ({exact / total:.1%}); "
           f"target accuracy: {target_correct}/{total} ({target_correct / total:.1%})")
+    impact_precision = impact_tp / (impact_tp + impact_fp) if impact_tp + impact_fp else 1.0
+    impact_recall = impact_tp / (impact_tp + impact_fn) if impact_tp + impact_fn else 1.0
+    impact_f1 = (
+        2 * impact_precision * impact_recall / (impact_precision + impact_recall)
+        if impact_precision + impact_recall else 0.0
+    )
+    print(
+        "Reported affected-device set vs generator intended-impact set: "
+        f"micro precision={impact_precision:.1%}, recall={impact_recall:.1%}, "
+        f"F1={impact_f1:.1%}; exact set match={impact_exact}/{total} ({impact_exact / total:.1%})"
+    )
     print("Actual \\ Predicted | " + " | ".join(labels.values()) + " | OTHER")
     for actual in labels.values():
         row = [str(confusion[actual][predicted]) for predicted in labels.values()]
