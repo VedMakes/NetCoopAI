@@ -16,12 +16,13 @@ from netcoop.communication.tasks import DiagnosticTaskArtifact
 from netcoop.models.enums import ConfidenceCategory, ProposalDecision, TowerId
 from netcoop.models.findings import Finding
 from netcoop.models.hypotheses import Hypothesis
-from netcoop.models.observations import TopologyObservation
+from netcoop.models.observations import MetricObservation, TopologyObservation
 from netcoop.models.reports import ClaimEvidenceManifest, FinalReport, PathTriage, TowerReport
 from netcoop.supervisor.agent import SupervisoryRCAAgent
 from netcoop.supervisor.gate import EvidenceReleaseGate
 from netcoop.supervisor.models import (
     GateOutcome,
+    GateResult,
     IncidentDossier,
     IncidentLifecycleState,
     InvestigationBudget,
@@ -55,6 +56,7 @@ class SupervisorRuntime:
         gate: EvidenceReleaseGate | None = None,
         budget: InvestigationBudget | None = None,
         network_profile: dict[str, str] | None = None,
+        explain: Any | None = None,
     ) -> None:
         self.repo = repository
         self.fabric = fabric or IntegrationFabric(repository=self.repo)
@@ -62,12 +64,14 @@ class SupervisorRuntime:
         self.rca_agent = rca_agent or SupervisoryRCAAgent()
         self.budget = budget or InvestigationBudget()
         self.network_profile = network_profile
+        self.explain = explain
 
         # Operational state
         self.state = IncidentLifecycleState.CREATED
         self.supervisor_calls: int = 0
         self.investigation_rounds: int = 0
         self.tasks_dispatched: int = 0
+        self._task_fingerprints: set[tuple[str, str, str, tuple[str, ...]]] = set()
 
     @property
     def budget_used(self) -> dict[str, int]:
@@ -86,6 +90,11 @@ class SupervisorRuntime:
         data_quality_warnings: list[str] | None = None,
     ) -> FinalReport:
         """Runs full end-to-end incident investigation workflow deterministically."""
+        self._explain("intake", f"Loaded {len(observations)} normalized observations; {len(data_quality_warnings or [])} data quality warning(s).")
+        for warning in (data_quality_warnings or [])[:20]:
+            self._explain("intake warning", warning)
+        if len(data_quality_warnings or []) > 20:
+            self._explain("intake warning", f"{len(data_quality_warnings or []) - 20} additional warning(s) omitted from the live trace; see report.")
         # Step 1: Initialize incident record
         self.state = IncidentLifecycleState.CREATED
         if self.repo is not None:
@@ -99,8 +108,38 @@ class SupervisorRuntime:
 
         # Step 2: Run all four diagnostic towers
         self.state = IncidentLifecycleState.TOWERS_RUNNING
+        def explain_tower(tower_id: TowerId, tower_report: TowerReport) -> None:
+            if self.explain is None:
+                return
+            summary = f"{len(tower_report.findings)} finding(s), {len(tower_report.hypotheses)} hypothesis(es)."
+            for finding in tower_report.findings:
+                summary += (
+                    f"\n  {finding.severity.value} {finding.finding_type} ({finding.confidence:.2f}): "
+                    f"{finding.description}; entities={', '.join(finding.entity_refs) or 'unspecified'}; "
+                    f"evidence={', '.join(finding.evidence_refs)}"
+                )
+                related_metrics = [
+                    observation for observation in observations
+                    if isinstance(observation, MetricObservation)
+                    and observation.entity_id in finding.entity_refs
+                ]
+                by_sample: dict[tuple[str, str, datetime], list[MetricObservation]] = {}
+                for observation in related_metrics:
+                    by_sample.setdefault(
+                        (observation.entity_id, observation.metric_name, observation.timestamp), []
+                    ).append(observation)
+                for (entity, metric, timestamp), samples in by_sample.items():
+                    if len({sample.value for sample in samples}) > 1:
+                        values = ", ".join(
+                            f"{sample.value:g} {sample.unit} [{sample.observation_id}, {sample.source}]"
+                            for sample in samples
+                        )
+                        summary += f"\n  CONFLICT {entity}.{metric} at {timestamp.isoformat()}: {values}"
+            self._explain("specialist", f"{tower_id.value} analyzed the shared observation set. {summary}")
+
         tower_reports: dict[TowerId, TowerReport] = self.fabric.run_all_towers(
-            incident_id=incident_id, observations=observations
+            incident_id=incident_id, observations=observations,
+            on_tower_complete=explain_tower if self.explain is not None else None,
         )
         if self.repo is not None:
             for report in tower_reports.values():
@@ -127,69 +166,25 @@ class SupervisorRuntime:
         self.state = IncidentLifecycleState.SUPERVISOR_REASONING
         proposal, manifest = self.rca_agent.diagnose(dossier)
         self.supervisor_calls += 1
+        self._explain("supervisor", f"Supervisor returned {proposal.decision.value}; confidence={proposal.confidence_category.value}; claim={manifest.claim}")
 
         # Step 5: Handle investigation requests if budget allows
         if proposal.decision == ProposalDecision.REQUEST_EVIDENCE:
             if (
                 self.supervisor_calls < self.budget.max_supervisor_calls
-                and
-                self.investigation_rounds < self.budget.max_investigation_rounds
+                and self.investigation_rounds < self.budget.max_investigation_rounds
                 and self.tasks_dispatched < self.budget.max_tasks
             ):
                 self.state = IncidentLifecycleState.INVESTIGATING
                 self.investigation_rounds += 1
-
-                for task_req in proposal.requested_tasks:
-                    if self.tasks_dispatched >= self.budget.max_tasks:
-                        break
-
-                    assignee = task_req.get("assignee")
-                    capability = task_req.get("capability")
-                    objective = task_req.get("objective", {})
-
-                    if assignee and capability:
-                        task = self.fabric.create_task(
-                            requester="supervisor",
-                            assignee=assignee,
-                            capability=capability,
-                            objective=objective,
-                            incident_id=incident_id,
-                        )
-                        task_res = self.fabric.dispatch_task(task.task_id)
-                        self.tasks_dispatched += 1
-
-                        history_entry: dict[str, Any] = {
-                            "task_id": task.task_id,
-                            "assignee": task.assignee.value,
-                            "capability": task.capability,
-                            "status": task_res.status.value,
-                            "result_schema": task_res.result_schema,
-                            "result": task_res.result,
-                            "finding_refs": task_res.finding_refs,
-                            "evidence_refs": task_res.evidence_refs,
-                            "warnings": task_res.warnings,
-                            "limitations": task_res.limitations,
-                        }
-                        if task_res.result_schema != task.expected_result_schema:
-                            history_entry["warnings"].append(
-                                f"Result schema mismatch: expected {task.expected_result_schema}, got {task_res.result_schema}."
-                            )
-                        elif task_res.status.value == "COMPLETED" and task_res.result:
-                            self._merge_task_artifact(
-                                dossier,
-                                task_res.result,
-                                history_entry,
-                                task_res.finding_refs,
-                                task_res.evidence_refs,
-                                {obs.observation_id for obs in observations},
-                            )
-                        dossier.task_history.append(history_entry)
+                self._dispatch_task_requests(proposal, dossier, incident_id, observations)
 
                 # Re-diagnose with updated task history in round 2
                 dossier.investigation_round += 1
                 self.state = IncidentLifecycleState.SUPERVISOR_REASONING
                 proposal, manifest = self.rca_agent.diagnose(dossier)
                 self.supervisor_calls += 1
+                self._explain("supervisor", f"Supervisor reconsidered after specialist response: {proposal.decision.value}; confidence={proposal.confidence_category.value}; claim={manifest.claim}")
             else:
                 proposal = proposal.model_copy(update={
                     "decision": ProposalDecision.ABSTAIN,
@@ -207,6 +202,12 @@ class SupervisorRuntime:
                     contradiction_ids=proposal.alternative_causes,
                     contradiction_disclosures=[],
                 )
+
+        if proposal.decision == ProposalDecision.REQUEST_EVIDENCE:
+            proposal = self._abstain_for_budget(
+                proposal, reason="The supervisor still requires evidence after the allowed investigation round."
+            )
+            manifest = self._abstention_manifest(proposal, incident_id)
 
         # Step 6: Evidence and Release Gate verification
         self.state = IncidentLifecycleState.PROPOSED
@@ -232,18 +233,73 @@ class SupervisorRuntime:
             for warning in entry.get("warnings", [])
         )
 
-        gate_result = self.gate.evaluate(
-            proposal=proposal,
-            manifest=manifest,
-            incident_id=incident_id,
-            known_observations=observations,
-            known_findings=dossier.findings,
-            competing_hypotheses=competing_hypotheses,
-            data_quality_warnings=data_quality_warnings,
-            orchestration_warnings=orchestration_warnings,
-            peer_interactions=dossier.peer_query_history,
-            network_profile=self.network_profile,
-        )
+        def evaluate_gate() -> GateResult:
+            return self.gate.evaluate(
+                proposal=proposal,
+                manifest=manifest,
+                incident_id=incident_id,
+                known_observations=observations,
+                known_findings=dossier.findings,
+                competing_hypotheses=competing_hypotheses,
+                data_quality_warnings=data_quality_warnings,
+                orchestration_warnings=orchestration_warnings,
+                peer_interactions=dossier.peer_query_history,
+                network_profile=self.network_profile,
+            )
+
+        gate_result = evaluate_gate()
+        gate_retries = 0
+        if not gate_result.passed:
+            for check in gate_result.checks:
+                check_status = "PASS" if check.passed else "WARN" if check.severity == "warning" else "FAIL"
+                self._explain("gate attempt 1", f"{check_status} {check.check_name}: {check.message}")
+        if (
+            not gate_result.passed
+            and gate_result.issues
+            and any(issue.retryable for issue in gate_result.issues)
+            and gate_retries < self.budget.max_retries
+        ):
+            gate_retries += 1
+            dossier.gate_feedback = [issue.model_dump(mode="json") for issue in gate_result.issues]
+            orchestration_warnings.append(
+                "Gate retry requested: "
+                + "; ".join(f"{issue.code}: {issue.message}" for issue in gate_result.issues)
+            )
+            self._explain(
+                "gate retry",
+                "Gate rejected the proposal with actionable issue(s); requesting one bounded supervisor review: "
+                + "; ".join(f"{issue.code}: {issue.message}" for issue in gate_result.issues),
+            )
+            if self.supervisor_calls < self.budget.max_supervisor_calls:
+                proposal, manifest = self.rca_agent.diagnose(dossier)
+                self.supervisor_calls += 1
+                self._explain("supervisor", f"Gate-feedback review returned {proposal.decision.value}; confidence={proposal.confidence_category.value}.")
+                if proposal.decision == ProposalDecision.REQUEST_EVIDENCE:
+                    if (
+                        self.investigation_rounds < self.budget.max_investigation_rounds
+                        and self.tasks_dispatched < self.budget.max_tasks
+                    ):
+                        self.investigation_rounds += 1
+                        self.state = IncidentLifecycleState.INVESTIGATING
+                        self._dispatch_task_requests(proposal, dossier, incident_id, observations)
+                        dossier.investigation_round += 1
+                        if self.supervisor_calls < self.budget.max_supervisor_calls:
+                            proposal, manifest = self.rca_agent.diagnose(dossier)
+                            self.supervisor_calls += 1
+                    else:
+                        proposal = self._abstain_for_budget(proposal)
+                        manifest = self._abstention_manifest(proposal, incident_id)
+                if proposal.decision == ProposalDecision.REQUEST_EVIDENCE:
+                    proposal = self._abstain_for_budget(
+                        proposal, reason="The gate retry did not resolve the requested evidence gap."
+                    )
+                    manifest = self._abstention_manifest(proposal, incident_id)
+                gate_result = evaluate_gate()
+
+        for check in gate_result.checks:
+            check_status = "PASS" if check.passed else "WARN" if check.severity == "warning" else "FAIL"
+            self._explain("gate final", f"{check_status} {check.check_name}: {check.message}")
+        self._explain("gate", f"Release outcome: {gate_result.outcome.value}; {len(gate_result.errors)} error(s), {len(gate_result.warnings)} warning(s).")
 
         # Persist proposal and gate result
         if self.repo is not None:
@@ -269,15 +325,32 @@ class SupervisorRuntime:
             report = self._add_path_triage(report, incident_id, observations)
             if self.repo is not None:
                 self.repo.insert_final_report(report)
+            self._explain_final_report(report, gate_result)
             return report
 
         if not gate_result.passed or gate_result.certified_final_report is None:
-            self.state = IncidentLifecycleState.FAILED
-            raise EvidenceGateRejectionError(
-                f"EvidenceReleaseGate rejected proposed diagnosis with {len(gate_result.errors)} errors: "
-                + "; ".join(gate_result.errors),
-                errors=gate_result.errors,
+            self.state = IncidentLifecycleState.ABSTAINED
+            report = FinalReport(
+                incident_id=incident_id,
+                status="insufficient_evidence",
+                suspected_root_cause="ABSTAIN: Evidence gate could not certify the diagnosis.",
+                confidence=0.0,
+                confidence_category=ConfidenceCategory.INSUFFICIENT,
+                affected_devices=[],
+                supporting_evidence=[],
+                alternative_causes=proposal.alternative_causes,
+                recommended_actions=["Resolve the evidence-gate issues and collect any missing discriminating telemetry."],
+                evidence_sources=[],
+                limitations=gate_result.errors or gate_result.warnings,
+                data_quality_warnings=data_quality_warnings or [],
+                generated_at=datetime.now(timezone.utc),
             )
+            report = self._add_path_triage(report, incident_id, observations)
+            if self.repo is not None:
+                self.repo.insert_gate_result(incident_id, gate_result)
+                self.repo.insert_final_report(report)
+            self._explain_final_report(report, gate_result)
+            return report
 
         # Publication verified
         self.state = IncidentLifecycleState.PUBLISHED
@@ -287,7 +360,145 @@ class SupervisorRuntime:
         if self.repo is not None:
             self.repo.insert_final_report(final_report)
 
+        self._explain_final_report(final_report, gate_result)
         return final_report
+
+    def _explain_final_report(self, report: FinalReport, gate_result: GateResult) -> None:
+        """Show the certified report after gate processing and supplemental path context."""
+        warning_text = "; ".join([*gate_result.warnings, *gate_result.limitations]) or "none"
+        self._explain(
+            "published report",
+            f"status={report.status}; gate={gate_result.outcome.value}; "
+            f"diagnosis={report.suspected_root_cause}; confidence="
+            f"{report.confidence_category.value} ({report.confidence:.2f}); "
+            f"affected={', '.join(report.affected_devices) or 'none'}; "
+            f"limitations={'; '.join(report.limitations) or 'none'}; warnings={warning_text}",
+        )
+
+    def _dispatch_task_requests(
+        self,
+        proposal: Any,
+        dossier: IncidentDossier,
+        incident_id: str,
+        observations: list[CanonicalObservation],
+    ) -> int:
+        """Dispatch only the supervisor's bounded, capability-routed read-only tasks."""
+        dispatched = 0
+        known_ids = {observation.observation_id for observation in observations}
+        for task_request in proposal.requested_tasks:
+            if self.tasks_dispatched >= self.budget.max_tasks:
+                break
+            assignee = task_request.get("assignee")
+            capability = task_request.get("capability")
+            objective = task_request.get("objective", {})
+            if not assignee or not capability or not isinstance(objective, dict):
+                dossier.task_history.append({
+                    "capability": capability,
+                    "status": "REJECTED",
+                    "warnings": ["Malformed task request; assignee, capability, and object are required."],
+                    "limitations": [],
+                })
+                continue
+            fingerprint = (
+                str(assignee).casefold(),
+                str(capability),
+                str(objective.get("hypothesis_code", "")),
+                tuple(sorted(str(entity) for entity in objective.get("target_entities", []))),
+            )
+            if fingerprint in self._task_fingerprints:
+                dossier.task_history.append({
+                    "capability": capability,
+                    "assignee": str(assignee),
+                    "status": "SKIPPED_DUPLICATE",
+                    "warnings": ["Repeated task request skipped; no new evidence would be added."],
+                    "limitations": [],
+                })
+                continue
+            try:
+                task = self.fabric.create_task(
+                    requester="supervisor",
+                    assignee=assignee,
+                    capability=capability,
+                    objective=objective,
+                    incident_id=incident_id,
+                )
+                result = self.fabric.dispatch_task(task.task_id)
+                self._task_fingerprints.add(fingerprint)
+            except (ValueError, KeyError, PermissionError) as exc:
+                dossier.task_history.append({
+                    "capability": capability,
+                    "assignee": str(assignee),
+                    "status": "REJECTED",
+                    "warnings": [f"Task request rejected: {exc}"],
+                    "limitations": [],
+                })
+                self._explain("handoff", f"Task rejected for {assignee} / {capability}: {exc}")
+                continue
+
+            self.tasks_dispatched += 1
+            dispatched += 1
+            history_entry: dict[str, Any] = {
+                "task_id": task.task_id,
+                "assignee": task.assignee.value,
+                "capability": task.capability,
+                "status": result.status.value,
+                "result_schema": result.result_schema,
+                "result": result.result,
+                "finding_refs": result.finding_refs,
+                "evidence_refs": result.evidence_refs,
+                "warnings": result.warnings,
+                "limitations": result.limitations,
+            }
+            if result.result_schema != task.expected_result_schema:
+                history_entry["warnings"].append(
+                    f"Result schema mismatch: expected {task.expected_result_schema}, got {result.result_schema}."
+                )
+            elif result.status.value == "COMPLETED" and result.result:
+                self._merge_task_artifact(
+                    dossier, result.result, history_entry,
+                    result.finding_refs, result.evidence_refs, known_ids,
+                )
+            review_summaries = [
+                review.get("summary", "")
+                for review in history_entry.get("hypothesis_reviews", [])
+                if isinstance(review, dict)
+            ]
+            self._explain(
+                "handoff",
+                f"supervisor -> {assignee} / {capability}; status={result.status.value}; "
+                f"evidence={', '.join(result.evidence_refs) or 'none'}; "
+                f"review={'; '.join(review_summaries) or 'no structured hypothesis review'}; "
+                f"warnings={'; '.join(result.warnings) or 'none'}",
+            )
+            dossier.task_history.append(history_entry)
+        return dispatched
+
+    @staticmethod
+    def _abstain_for_budget(
+        proposal: Any,
+        reason: str = "Investigation could not be completed within the configured orchestration budget.",
+    ):
+        return proposal.model_copy(update={
+            "decision": ProposalDecision.ABSTAIN,
+            "suspected_root_cause": None,
+            "confidence_category": ConfidenceCategory.INSUFFICIENT,
+            "recommended_actions": ["Collect the requested discriminating telemetry and rerun diagnosis."],
+            "abstain_reason": reason,
+            "requested_tasks": [],
+        })
+
+    @staticmethod
+    def _abstention_manifest(proposal: Any, incident_id: str) -> ClaimEvidenceManifest:
+        return ClaimEvidenceManifest(
+            incident_id=incident_id,
+            claim=f"Abstained: {proposal.abstain_reason or 'insufficient evidence'}",
+            claimed_entities=proposal.affected_entities,
+            finding_ids=[],
+            observation_ids=[],
+            independence_groups=[],
+            contradiction_ids=proposal.alternative_causes,
+            contradiction_disclosures=[],
+        )
 
     def _add_path_triage(
         self, report: FinalReport, incident_id: str, observations: list[CanonicalObservation]
@@ -386,6 +597,7 @@ class SupervisorRuntime:
                 created_at=datetime.now(timezone.utc),
             )
             result = self.fabric.query_peer(query)
+            self._explain("handoff", f"{query.requester} -> {query.recipient} / {query.capability} scope={', '.join(query.scope)}; status={result.status.value}; result={result.result}; evidence={', '.join(result.evidence_refs) or 'none'}")
             dossier.peer_query_history.append({
                 "query_id": query.query_id,
                 "requester": query.requester,
@@ -411,6 +623,11 @@ class SupervisorRuntime:
                     f"{len(dependencies) - max_queries} declared dependencies were not queried."
                 ],
             })
+
+    def _explain(self, stage: str, message: str) -> None:
+        """Emit a live, user-facing workflow event when explain mode is enabled."""
+        if self.explain is not None:
+            self.explain(stage, message)
 
     @staticmethod
     def _merge_task_artifact(
@@ -438,6 +655,18 @@ class SupervisorRuntime:
             unknown_observations = (actual_evidence_refs | finding_evidence_refs) - known_observation_ids
             if unknown_observations:
                 raise ValueError(f"Task findings cite unknown observations: {sorted(unknown_observations)}")
+            review_refs = {
+                ref
+                for review in artifact.get("hypothesis_reviews", [])
+                for ref in (
+                    review.get("supporting_evidence_refs", [])
+                    + review.get("contradicting_evidence_refs", [])
+                    + review.get("inspected_evidence_refs", [])
+                )
+            }
+            if not review_refs.issubset(actual_evidence_refs):
+                raise ValueError("Hypothesis review references are missing from the task evidence envelope.")
+            history_entry["hypothesis_reviews"] = artifact.get("hypothesis_reviews", [])
 
             existing_finding_ids = {finding.finding_id for finding in dossier.findings}
             task_finding_ids = actual_finding_refs | existing_finding_ids

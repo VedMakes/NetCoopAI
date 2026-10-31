@@ -11,9 +11,41 @@ from typing import TYPE_CHECKING, Any
 
 from netcoop.models.enums import ConfidenceCategory, FindingStatus, ProposalDecision
 from netcoop.models.findings import Finding
-from netcoop.models.observations import CanonicalObservation, TopologyObservation
+from netcoop.models.observations import CanonicalObservation, MetricObservation, TopologyObservation
 from netcoop.models.reports import FinalReport, SupportingEvidenceItem
-from netcoop.supervisor.models import GateCheckResult, GateOutcome, GateResult
+from netcoop.supervisor.models import GateCheckResult, GateIssue, GateOutcome, GateResult
+
+_GATE_ISSUE_POLICY: dict[str, tuple[str, bool]] = {
+    "root_cause_present": ("missing_root_cause", True),
+    "confidence_sufficient": ("confidence_insufficient", False),
+    "supporting_findings_present": ("missing_support", True),
+    "finding_existence": ("invalid_finding_reference", True),
+    "manifest_finding_existence": ("invalid_finding_reference", True),
+    "observation_existence": ("invalid_observation_reference", True),
+    "finding_scope": ("finding_scope_mismatch", False),
+    "observation_scope": ("observation_scope_mismatch", False),
+    "finding_not_superseded": ("stale_finding", False),
+    "finding_not_retracted": ("retracted_finding", False),
+    "contradiction_disclosure": ("unresolved_hypothesis", True),
+    "same_time_measurement_consistency": ("measurement_conflict", True),
+}
+
+
+def _issues_from_checks(checks: list[GateCheckResult]) -> list[GateIssue]:
+    issues: list[GateIssue] = []
+    for check in checks:
+        if check.passed:
+            continue
+        code, retryable = _GATE_ISSUE_POLICY.get(
+            check.check_name, ("gate_check_failed", False)
+        )
+        issues.append(GateIssue(
+            code=code,
+            check_name=check.check_name,
+            message=check.message,
+            retryable=retryable,
+        ))
+    return issues
 
 if TYPE_CHECKING:
     from netcoop.models.reports import ClaimEvidenceManifest, SupervisorProposal
@@ -145,6 +177,7 @@ class EvidenceReleaseGate:
                 outcome=GateOutcome.ABSTAIN if not errors else GateOutcome.REJECT,
                 passed=len(errors) == 0,
                 checks=checks,
+                issues=_issues_from_checks(checks),
                 errors=errors,
                 warnings=warnings,
                 limitations=limitations,
@@ -308,6 +341,45 @@ class EvidenceReleaseGate:
             # Downgrade confidence category
             proposal.confidence_category = ConfidenceCategory.MODERATE
 
+        # Conflicting values for the same metric, entity, and timestamp weaken
+        # support even when one tower's threshold rule can still identify a fault.
+        metric_samples: dict[tuple[str, str, datetime], list[CanonicalObservation]] = {}
+        target_entities = set(proposal.affected_entities)
+        for observation in obs_map.values():
+            if not isinstance(observation, MetricObservation):
+                continue
+            if target_entities and observation.entity_id not in target_entities:
+                continue
+            metric_samples.setdefault(
+                (observation.entity_id, observation.metric_name, observation.timestamp), []
+            ).append(observation)
+        conflict_groups = [
+            (key, items) for key, items in metric_samples.items()
+            if len({item.value for item in items}) > 1
+        ]
+        for (entity_id, metric_name, observed_at), items in conflict_groups:
+            values = ", ".join(
+                f"{item.value:g} {item.unit} ({item.observation_id})" for item in items
+            )
+            message = (
+                f"Conflicting {metric_name} readings for {entity_id} at "
+                f"{observed_at.isoformat()}: {values}."
+            )
+            warnings.append(message)
+            limitations.append(
+                f"Conflicting same-time telemetry for {entity_id}.{metric_name}; verify the source before acting."
+            )
+            checks.append(GateCheckResult(
+                check_name="same_time_measurement_consistency",
+                passed=False,
+                message=message,
+                severity="warning",
+            ))
+        if conflict_groups and proposal.confidence_category in {
+            ConfidenceCategory.HIGH, ConfidenceCategory.MODERATE,
+        }:
+            proposal.confidence_category = ConfidenceCategory.LOW
+
         # 7. Synthesize Supporting Evidence Items for Final Report
         evidence_items: list[SupportingEvidenceItem] = []
         for f in cited_findings:
@@ -402,6 +474,7 @@ class EvidenceReleaseGate:
             outcome=outcome,
             passed=passed,
             checks=checks,
+            issues=_issues_from_checks(checks),
             errors=errors,
             warnings=warnings,
             limitations=limitations,

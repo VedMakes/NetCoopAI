@@ -2,7 +2,7 @@
 
 from collections.abc import Callable
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -154,6 +154,21 @@ class TaskResult(BaseModel):
         return _ensure_utc(v)
 
 
+class HypothesisReview(BaseModel):
+    """Evidence-grounded review of a hypothesis, including what could falsify it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    fault_code: str
+    status: Literal["supported", "weakened", "inconclusive"]
+    supporting_evidence_refs: list[str] = Field(default_factory=list)
+    contradicting_evidence_refs: list[str] = Field(default_factory=list)
+    inspected_evidence_refs: list[str] = Field(default_factory=list)
+    missing_measurements: list[str] = Field(default_factory=list)
+    discriminating_measurement: str
+    summary: str
+
+
 class DiagnosticTaskArtifact(BaseModel):
     """Versioned result contract shared by bounded tower investigations."""
 
@@ -169,6 +184,7 @@ class DiagnosticTaskArtifact(BaseModel):
     observation_count: int | None = None
     summary: str
     analysis: dict[str, Any] | None = None
+    hypothesis_reviews: list[HypothesisReview] = Field(default_factory=list)
 
 
 TaskHandler = Callable[[InvestigationTask], TaskResult]

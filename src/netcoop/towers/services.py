@@ -30,7 +30,7 @@ from netcoop.models.observations import (
 )
 from netcoop.models.reports import TowerReport
 from netcoop.storage.sqlite import SQLiteRepository
-from netcoop.towers.base import investigate_with_engine
+from netcoop.towers.base import investigate_with_engine, query_incident_observations
 from netcoop.towers.rules import load_rules
 from netcoop.utils.id_generator import generate_id
 
@@ -191,7 +191,7 @@ class ServicesEngine:
         dhcp_keywords = [
             k.upper()
             for k in self.rules.get(
-                "dhcp_error_keywords", ["EXHAUSTED", "TIMEOUT", "NAK", "POOL_FULL", "DHCP_FAILURE"]
+                "dhcp_error_keywords", ["EXHAUSTED", "NAK", "POOL_FULL", "DHCP_FAILURE", "DHCP"]
             )
         ]
 
@@ -207,10 +207,12 @@ class ServicesEngine:
                 is_dhcp_entity = obs.entity_id in dhcp_entities or (
                     not profile_roles_configured and "DHCP" in obs.entity_id.upper()
                 )
-                if is_dhcp_entity or any(k in msg_upper for k in dhcp_keywords):
-                    if any(k in msg_upper for k in dhcp_keywords) or obs.log_level in ("ERROR", "CRITICAL"):
-                        dhcp_obs.append(obs)
-                        target_entity = obs.entity_id
+                has_dhcp_signal = any(k in msg_upper for k in dhcp_keywords)
+                if has_dhcp_signal or (
+                    is_dhcp_entity and obs.log_level in ("ERROR", "CRITICAL")
+                ):
+                    dhcp_obs.append(obs)
+                    target_entity = obs.entity_id
             elif isinstance(obs, MetricObservation) and (
                 obs.entity_id in dhcp_entities
                 or (not profile_roles_configured and "DHCP" in obs.entity_id.upper())
@@ -397,37 +399,64 @@ class ServicesTower:
         now = datetime.now(timezone.utc)
 
         if cap == "services.check_dns":
-            target = query.scope[0] if query.scope else "SRV_DNS_01"
-            # Return DNS status summary
-            return PeerQueryResult(
-                query_id=query.query_id,
-                status=QueryStatus.COMPLETED,
-                result={"server": target, "healthy": True, "avg_latency_ms": 12.0},
-                completed_at=now,
-            )
+            fault_code = "DNS_FAILURE"
 
         elif cap == "services.check_dhcp":
-            target = query.scope[0] if query.scope else "SRV_DHCP_01"
-            return PeerQueryResult(
-                query_id=query.query_id,
-                status=QueryStatus.COMPLETED,
-                result={"server": target, "pool_utilization_pct": 45.0, "status": "operational"},
-                completed_at=now,
-            )
+            fault_code = "DHCP_FAILURE"
 
         elif cap == "services.query_config_drift":
-            target = query.scope[0] if query.scope else "SW_CORE_01"
+            fault_code = "CONFIG_DRIFT"
+        else:
             return PeerQueryResult(
                 query_id=query.query_id,
-                status=QueryStatus.COMPLETED,
-                result={"entity_id": target, "recent_drift_count": 0},
+                status=QueryStatus.UNSUPPORTED,
+                warnings=[f"Capability '{cap}' not supported by ServicesTower"],
                 completed_at=now,
             )
 
+        if not query.scope:
+            return PeerQueryResult(
+                query_id=query.query_id, status=QueryStatus.INVALID_SCOPE,
+                warnings=[f"{cap} requires an entity scope."], completed_at=now,
+            )
+        scoped = query_incident_observations(self.repository, query)
+        findings, hypotheses = self.engine.analyze(query.incident_id, scoped)
+        relevant_findings = [finding for finding in findings if any(
+            entity in query.scope or any(entity.startswith(f"{target}:") for target in query.scope)
+            for entity in finding.entity_refs
+        ) and finding.finding_type in {
+            "dns_resolution_failure" if fault_code == "DNS_FAILURE" else
+            "dhcp_lease_exhaustion" if fault_code == "DHCP_FAILURE" else
+            "config_drift_detected"
+        }]
+        relevant_hypotheses = [hyp for hyp in hypotheses if hyp.fault_code == fault_code]
+        refs = list(dict.fromkeys(ref for finding in relevant_findings for ref in finding.evidence_refs))
+        if fault_code == "DNS_FAILURE":
+            has_relevant_inputs = any(
+                isinstance(item, LogObservation)
+                or isinstance(item, MetricObservation) and item.metric_name == "latency_ms"
+                for item in scoped
+            )
+        elif fault_code == "DHCP_FAILURE":
+            has_relevant_inputs = any(
+                isinstance(item, LogObservation)
+                or isinstance(item, MetricObservation) and item.metric_name in {"latency_ms", "packet_loss_pct"}
+                for item in scoped
+            )
+        else:
+            has_relevant_inputs = any(isinstance(item, ConfigObservation) for item in scoped)
         return PeerQueryResult(
             query_id=query.query_id,
-            status=QueryStatus.UNSUPPORTED,
-            warnings=[f"Capability '{cap}' not supported by ServicesTower"],
+            status=QueryStatus.COMPLETED,
+            result={
+                "entities": query.scope,
+                "fault_code": fault_code,
+                "status": "failure_signal_observed" if relevant_hypotheses else "no_failure_signal_observed" if has_relevant_inputs else "unknown",
+                "findings": [finding.model_dump(mode="json") for finding in relevant_findings],
+                "hypotheses": [hyp.model_dump(mode="json") for hyp in relevant_hypotheses],
+            },
+            evidence_refs=refs,
+            warnings=[] if has_relevant_inputs else ["No matching incident evidence was available; no live service query was made."],
             completed_at=now,
         )
 

@@ -178,7 +178,8 @@ def test_services_peer_queries_and_tasks():
     )
     res_dns = tower.handle_query(q_dns)
     assert res_dns.status == QueryStatus.COMPLETED
-    assert res_dns.result["healthy"] is True
+    assert res_dns.result["status"] == "unknown"
+    assert any("No matching incident evidence" in warning for warning in res_dns.warnings)
 
     # 2. DHCP check query
     q_dhcp = PeerQuery(
@@ -193,7 +194,8 @@ def test_services_peer_queries_and_tasks():
     )
     res_dhcp = tower.handle_query(q_dhcp)
     assert res_dhcp.status == QueryStatus.COMPLETED
-    assert "pool_utilization_pct" in res_dhcp.result
+    assert res_dhcp.result["status"] == "unknown"
+    assert any("No matching incident evidence" in warning for warning in res_dhcp.warnings)
 
     # 3. Investigation task
     task = InvestigationTask(

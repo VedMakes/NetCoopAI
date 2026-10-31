@@ -48,14 +48,15 @@ def test_device_overload_detected(sample_utc_time):
 
     assert len(findings) == 1
     assert findings[0].finding_type == "hardware_overload"
-    assert findings[0].severity == Severity.CRITICAL
+    # A single poll is insufficient to justify a critical sustained-overload claim.
+    assert findings[0].severity == Severity.HIGH
     assert findings[0].entity_refs == ["SW_CORE_01"]
     assert "C1" in findings[0].evidence_refs
     assert "M1" in findings[0].evidence_refs
 
     assert len(hypotheses) == 1
     assert hypotheses[0].fault_code == "DEVICE_OVERLOAD"
-    assert hypotheses[0].confidence_category == ConfidenceCategory.HIGH
+    assert hypotheses[0].confidence_category == ConfidenceCategory.LOW
     assert "SW_CORE_01" in hypotheses[0].suspected_entities
 
 

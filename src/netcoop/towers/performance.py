@@ -30,7 +30,7 @@ from netcoop.models.hypotheses import Hypothesis
 from netcoop.models.observations import CanonicalObservation, MetricObservation
 from netcoop.models.reports import TowerReport
 from netcoop.storage.sqlite import SQLiteRepository
-from netcoop.towers.base import investigate_with_engine
+from netcoop.towers.base import investigate_with_engine, query_incident_observations
 from netcoop.towers.rules import load_rules
 from netcoop.utils.id_generator import generate_id
 
@@ -469,23 +469,57 @@ class PerformanceTower:
         """Handles bounded, read-only peer queries for performance metrics."""
         now = datetime.now(timezone.utc)
         if query.capability == "performance.query_metric_window":
-            # Extract statistics for target entity
-            target = query.scope[0] if query.scope else "unknown"
+            if not query.scope:
+                return PeerQueryResult(
+                    query_id=query.query_id, status=QueryStatus.INVALID_SCOPE,
+                    warnings=["performance.query_metric_window requires an entity scope."],
+                    completed_at=now,
+                )
+            scoped = query_incident_observations(self.repo, query)
+            metrics: dict[str, list[MetricObservation]] = defaultdict(list)
+            for observation in scoped:
+                if isinstance(observation, MetricObservation):
+                    metrics[observation.metric_name].append(observation)
+            summary = {
+                name: {
+                    "count": len(items),
+                    "min": min(item.value for item in items),
+                    "max": max(item.value for item in items),
+                    "latest": max(items, key=lambda item: item.timestamp).value,
+                    "latest_at": max(item.timestamp for item in items).isoformat(),
+                    "evidence_refs": [item.observation_id for item in items],
+                }
+                for name, items in metrics.items()
+            }
+            refs = [item.observation_id for items in metrics.values() for item in items]
             return PeerQueryResult(
                 query_id=query.query_id,
                 status=QueryStatus.COMPLETED,
-                result={"entity_id": target, "status": "nominal"},
-                evidence_refs=[],
-                warnings=[],
+                result={"entities": query.scope, "metric_summary": summary, "observation_count": len(scoped)},
+                evidence_refs=refs,
+                warnings=[] if scoped else ["No matching incident observations were available; no live device query was made."],
                 completed_at=now,
             )
         elif query.capability == "performance.detect_congestion":
+            if not query.scope:
+                return PeerQueryResult(
+                    query_id=query.query_id, status=QueryStatus.INVALID_SCOPE,
+                    warnings=["performance.detect_congestion requires an entity scope."],
+                    completed_at=now,
+                )
+            scoped = query_incident_observations(self.repo, query)
+            findings, hypotheses = self.engine.analyze(query.incident_id, scoped)
+            refs = list(dict.fromkeys(ref for finding in findings for ref in finding.evidence_refs))
             return PeerQueryResult(
                 query_id=query.query_id,
                 status=QueryStatus.COMPLETED,
-                result={"congestion_detected": False},
-                evidence_refs=[],
-                warnings=[],
+                result={
+                    "congestion_detected": any(hyp.fault_code == "LINK_CONGESTION" for hyp in hypotheses),
+                    "findings": [finding.model_dump(mode="json") for finding in findings],
+                    "hypotheses": [hyp.model_dump(mode="json") for hyp in hypotheses],
+                },
+                evidence_refs=refs,
+                warnings=[] if scoped else ["No matching incident observations were available; no live device query was made."],
                 completed_at=now,
             )
         else:

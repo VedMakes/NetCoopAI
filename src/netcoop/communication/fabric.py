@@ -105,11 +105,13 @@ class IntegrationFabric:
                 "ANALYZE_WIFI_QUALITY",
                 "performance.inspect_upstream_capacity",
                 "performance.challenge_congestion_hypothesis",
+                "performance.challenge_wifi_hypothesis",
             ],
             TowerId.INFRASTRUCTURE: [
                 "INVESTIGATE_DEVICE",
                 "ANALYZE_INTERFACE",
                 "infrastructure.challenge_device_overload_hypothesis",
+                "infrastructure.challenge_interface_hypothesis",
             ],
             TowerId.CONNECTIVITY: [
                 "INVESTIGATE_TOPOLOGY",
@@ -122,6 +124,7 @@ class IntegrationFabric:
                 "ANALYZE_CONFIG_DRIFT",
                 "services.compare_config_snapshots",
                 "services.challenge_service_failure_hypothesis",
+                "services.challenge_config_hypothesis",
             ],
         }
 
@@ -170,7 +173,8 @@ class IntegrationFabric:
         )
 
     def run_all_towers(
-        self, incident_id: str, observations: list[CanonicalObservation] | None = None
+        self, incident_id: str, observations: list[CanonicalObservation] | None = None,
+        on_tower_complete: Any | None = None,
     ) -> dict[TowerId, TowerReport]:
         """Runs diagnostic engines across all four towers on the specified incident context.
 
@@ -181,6 +185,8 @@ class IntegrationFabric:
         for tower_id, tower in self.towers.items():
             report = tower.analyze_incident(incident_id, observations=observations)
             reports[tower_id] = report
+            if on_tower_complete is not None:
+                on_tower_complete(tower_id, report)
 
             if report.findings:
                 evt = EventEnvelope(

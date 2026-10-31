@@ -64,33 +64,72 @@ class DeterministicRCAProvider:
 
         # 2. Classify conflicts across towers
         conflicts = self._classify_conflicts(dossier)
+        dossier.conflicts = conflicts
+
+        if dossier.gate_feedback:
+            gate_tasks = self._gate_feedback_tasks(dossier)
+            if gate_tasks:
+                issue_codes = [item.get("code") for item in dossier.gate_feedback]
+                proposal = SupervisorProposal(
+                    proposal_id=generate_id("PROP-GATE-RETRY"),
+                    incident_id=dossier.incident_id,
+                    decision=ProposalDecision.REQUEST_EVIDENCE,
+                    suspected_root_cause=None,
+                    affected_entities=dossier.affected_entities,
+                    supporting_finding_refs=[],
+                    confidence_category=ConfidenceCategory.LOW,
+                    alternative_causes=[hyp.fault_code for hyp in dossier.hypotheses],
+                    recommended_actions=[],
+                    abstain_reason=None,
+                    requested_tasks=gate_tasks,
+                    created_at=datetime.now(timezone.utc),
+                )
+                manifest = ClaimEvidenceManifest(
+                    incident_id=dossier.incident_id,
+                    claim=f"Gate requested a targeted evidence review for issue(s): {issue_codes}.",
+                    claimed_entities=dossier.affected_entities,
+                    finding_ids=[], observation_ids=[], independence_groups=[],
+                    contradiction_ids=[hyp.fault_code for hyp in dossier.hypotheses],
+                    contradiction_disclosures=[str(item.get("message", "")) for item in dossier.gate_feedback],
+                )
+                return proposal, manifest
 
         # 3. Check if investigation task should be requested in round 1
         if dossier.investigation_round == 1 and not dossier.task_history:
             task_requests: list[dict[str, Any]] = []
+            challenge_capabilities = {
+                "LINK_CONGESTION": (TowerId.PERFORMANCE, "performance.challenge_congestion_hypothesis"),
+                "WEAK_WIFI": (TowerId.PERFORMANCE, "performance.challenge_wifi_hypothesis"),
+                "DEVICE_OVERLOAD": (TowerId.INFRASTRUCTURE, "infrastructure.challenge_device_overload_hypothesis"),
+                "INTERFACE_FAULT": (TowerId.INFRASTRUCTURE, "infrastructure.challenge_interface_hypothesis"),
+                "DNS_FAILURE": (TowerId.SERVICES, "services.challenge_service_failure_hypothesis"),
+                "DHCP_FAILURE": (TowerId.SERVICES, "services.challenge_service_failure_hypothesis"),
+                "CONFIG_DRIFT": (TowerId.SERVICES, "services.challenge_config_hypothesis"),
+                "ROUTING_FAILURE": (TowerId.CONNECTIVITY, "ANALYZE_REACHABILITY"),
+                "UPLINK_SATURATION": (TowerId.CONNECTIVITY, "connectivity.inspect_common_upstream"),
+            }
             for conflict in conflicts:
-                if conflict.recommended_discriminating_task:
-                    capability = conflict.recommended_discriminating_task
-                    assignee = conflict.recommended_assignee
-                    if assignee is None:
+                for index, fault_code in enumerate(conflict.competing_hypotheses):
+                    route = challenge_capabilities.get(fault_code)
+                    if route is None:
                         continue
-
-                    relevant_hypotheses = [
-                        h for h in dossier.hypotheses
-                        if h.fault_code in conflict.competing_hypotheses
-                    ]
-                    target_entities = list(dict.fromkeys(
-                        entity for hyp in relevant_hypotheses for entity in hyp.suspected_entities
-                    ))
+                    assignee, capability = route
+                    hypothesis = next((h for h in dossier.hypotheses if h.fault_code == fault_code), None)
+                    target_entities = hypothesis.suspected_entities if hypothesis else dossier.affected_entities
                     task_requests.append({
                         "assignee": assignee.value,
                         "capability": capability,
                         "objective": {
                             "incident_id": dossier.incident_id,
                             "conflict_type": conflict.conflict_type.value,
+                            "hypothesis_code": fault_code if ".challenge_" in capability else None,
                             "competing_hypotheses": conflict.competing_hypotheses,
-                            "target_entities": target_entities or dossier.affected_entities,
-                            "question": conflict.description,
+                            "target_entities": target_entities,
+                            "question": (
+                                f"Review {fault_code} against its supporting and contradicting evidence. "
+                                f"Name the measurement that would distinguish it from the competing hypothesis."
+                            ),
+                            "discriminating_measurement": conflict.disposition,
                         },
                     })
 
@@ -126,6 +165,42 @@ class DeterministicRCAProvider:
 
         # 4. Formulate Primary Root Cause Proposal based on causal priority
         return self._arbitrate_diagnosis(dossier, conflicts)
+
+    @staticmethod
+    def _gate_feedback_tasks(dossier: IncidentDossier) -> list[dict[str, Any]]:
+        """Select one existing read-only specialist capability for a gate evidence gap."""
+        retryable_codes = {item.get("code") for item in dossier.gate_feedback}
+        if not retryable_codes.intersection({"missing_support", "invalid_finding_reference"}):
+            return []
+        already_reviewed = {
+            review.get("fault_code")
+            for entry in dossier.task_history
+            for review in entry.get("hypothesis_reviews", [])
+            if isinstance(review, dict)
+        }
+        capability_by_fault = {
+            "LINK_CONGESTION": ("performance", "INVESTIGATE_CONGESTION"),
+            "WEAK_WIFI": ("performance", "ANALYZE_WIFI_QUALITY"),
+            "DEVICE_OVERLOAD": ("infrastructure", "INVESTIGATE_DEVICE"),
+            "INTERFACE_FAULT": ("infrastructure", "ANALYZE_INTERFACE"),
+            "DNS_FAILURE": ("services", "INVESTIGATE_DNS"),
+            "DHCP_FAILURE": ("services", "INVESTIGATE_DHCP"),
+            "CONFIG_DRIFT": ("services", "ANALYZE_CONFIG_DRIFT"),
+        }
+        for hypothesis in sorted(dossier.hypotheses, key=lambda item: item.confidence_score, reverse=True):
+            if hypothesis.fault_code in already_reviewed or hypothesis.fault_code not in capability_by_fault:
+                continue
+            assignee, capability = capability_by_fault[hypothesis.fault_code]
+            return [{
+                "assignee": assignee,
+                "capability": capability,
+                "objective": {
+                    "target_entities": hypothesis.suspected_entities,
+                    "question": "Reinspect incident evidence supporting this hypothesis after a gate support issue.",
+                    "gate_issue_codes": sorted(retryable_codes),
+                },
+            }]
+        return []
 
     def _classify_conflicts(self, dossier: IncidentDossier) -> list[ConflictItem]:
         """Identifies and classifies disagreements across tower findings and hypotheses."""
@@ -220,9 +295,17 @@ class DeterministicRCAProvider:
                 priority_map["ROUTING_FAILURE"] = 20
 
         # Sort hypotheses by adjusted priority * confidence_score
+        reviews: dict[str, dict[str, Any]] = {}
+        for entry in dossier.task_history:
+            for review in entry.get("hypothesis_reviews", []):
+                if isinstance(review, dict) and review.get("fault_code"):
+                    reviews[review["fault_code"]] = review
+
         def score_hyp(h: Hypothesis) -> float:
             base_prio = priority_map.get(h.fault_code, 40)
-            return base_prio * (0.5 + h.confidence_score)
+            review_status = reviews.get(h.fault_code, {}).get("status")
+            multiplier = {"supported": 1.0, "weakened": 0.2, "inconclusive": 0.75}.get(review_status, 1.0)
+            return base_prio * (0.5 + h.confidence_score) * multiplier
 
         ranked_hypotheses = sorted(hypotheses, key=score_hyp, reverse=True)
         concurrent_causes: list[str] = []
@@ -275,6 +358,10 @@ class DeterministicRCAProvider:
                 if h.fault_code != primary_hyp.fault_code and h not in coexisting_hypotheses
             ]
             conf_cat = primary_hyp.confidence_category
+            for conflict in conflicts:
+                statuses = [reviews.get(code, {}).get("status") for code in conflict.competing_hypotheses]
+                if len(statuses) > 1 and all(status in {"supported", "inconclusive"} for status in statuses):
+                    conf_cat = ConfidenceCategory.LOW
             concurrent_causes = [
                 f"{h.fault_code}: {h.suspected_entities}" for h in coexisting_hypotheses
             ]

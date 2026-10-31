@@ -137,6 +137,8 @@ class OpenRouterProvider:
             "6. Classify any competing hypotheses between towers and disclose them in alternative_causes.\n"
             "7. Distinguish independent simultaneous faults from competing explanations; list supported independent faults in concurrent_causes.\n"
             "8. Treat data-quality warnings and sparse observations as limitations; lower confidence or abstain when coverage cannot support a diagnosis.\n"
+            "9. When gate_feedback is present, address each issue using only the dossier. Request one targeted read-only task only when it can gather discriminating evidence; otherwise correct the proposal or abstain.\n"
+            "10. Challenge tasks must report supporting and contradicting evidence references, missing measurements, and a discriminating test. Repeating the same evidence is not independent confirmation.\n"
             "7. Output JSON format:\n"
             "{\n"
             '  "decision": "propose_diagnosis" | "request_evidence" | "abstain",\n'
@@ -163,6 +165,7 @@ class OpenRouterProvider:
                 "affected_entities": dossier.affected_entities,
                 "investigation_round": dossier.investigation_round,
                 "task_history": dossier.task_history,
+                "gate_feedback": dossier.gate_feedback,
                 "data_quality_warnings": dossier.data_quality_warnings,
                 "topology_summary": dossier.topology_summary,
                 "available_capabilities": dossier.available_capabilities[:8],

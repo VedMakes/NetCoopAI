@@ -30,11 +30,11 @@ Four deterministic towers look at different evidence:
 - **Connectivity:** recorded paths, partitions, and topology-based impact.
 - **Services:** DNS, DHCP, and configuration signals.
 
-Towers share the incident observations and can use bounded, typed queries for targeted checks. Their findings preserve source and evidence references.
+Towers share the incident observations and can use bounded, typed queries for targeted checks. Query handlers inspect the observations persisted for this incident and the supplied topology; they do not poll live devices. Their findings preserve source and evidence references. When the supervisor detects a supported conflict, each relevant specialist can receive a structured hypothesis review task that returns supporting, contradicting, inspected, and missing-evidence references.
 
 ### 3. Diagnosis and evidence gate
 
-The supervisor compares tower findings, resolves supported conflicts, and proposes a diagnosis or abstains. The independent evidence gate checks that claims have valid incident evidence and scope before the diagnosis is published. The default mode is deterministic and offline; an optional configured model can assist supervisor reasoning.
+The supervisor compares tower findings, resolves supported conflicts, and proposes a diagnosis or abstains. The independent evidence gate checks that claims have valid incident evidence and scope before the diagnosis is published. Gate checks include stable issue codes; one retry may route actionable issues through the supervisor for a bounded read-only investigation or proposal correction. Repeated tasks are skipped, task and supervisor-call budgets apply, and unresolved gate failures produce an abstention. The gate itself never selects or writes a diagnosis. The default mode is deterministic and offline; an optional configured model can assist supervisor reasoning.
 
 ### 4. Supplemental context
 

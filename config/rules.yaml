@@ -85,10 +85,10 @@ services:
     - "dns_failure"
   dhcp_error_keywords:
     - "exhausted"
-    - "timeout"
     - "nak"
     - "pool_full"
     - "dhcp_failure"
+    - "dhcp"
   config_sensitive_keys:
     - "mtu"
     - "vlan"

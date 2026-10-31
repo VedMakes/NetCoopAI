@@ -183,11 +183,14 @@ uv run netcoop diagnose fixtures/scenarios/dns_failure --db incident.db
 
 # Add an optional, post-diagnosis comparison with the caller's description
 uv run netcoop diagnose fixtures/scenarios/dns_failure --symptom "Users cannot resolve hostnames"
+uv run netcoop triage ./office-capture --explain
 ```
 
 `triage` is a field-friendly alias for `diagnose`. The first argument is local sample/capture data: a telemetry file, or a directory containing telemetry and optionally `topology.json`. `--sitemap`/`--topology` supplies a separate topology JSON; a saved site map at `config/sites/<site>/topology.json` is loaded automatically. `--site` tags the report and automatically loads `config/profiles/<site>.yaml` (or `.yml`) when present; otherwise NetCoop warns that it is using generic mappings. Use `--profile` to select another explicit profile. `profile-init` drafts a profile from local sample data and `profile-validate` checks it. The symptom agent runs only when `--symptom` is provided. This is a local CLI workflow; there is no browser-based upload endpoint.
 
 Path triage is part of the report as a separate supplemental section. Its queries run after the gate decision and report reachable, not reachable in recorded topology, or unknown, with any available route/evidence references. Incomplete topology can make a negative result inconclusive. The optional `--symptom` agent reports aligned, mismatch, or unclear and explains its comparison. Its model mode follows `--llm`; model failure falls back to local rules and is disclosed in the addendum. This remains a consistency check, not a diagnosis input.
+
+Use `--explain` to stream the workflow to stderr while diagnosis runs: intake warnings, each specialist tower's findings and evidence references, detected same-time measurement conflicts, peer/task handoffs and responses, supervisor proposal summaries, individual evidence-gate checks, and the final certified report confidence. The normal report remains on stdout (so `--format json` stays machine-readable). Explanations expose findings and concise rationale summaries, not private model chain-of-thought. If `--symptom` is also set, its post-gate run and result are shown as a separate stage. A symptom comparison is marked unclear when the certified diagnosis has weak evidence or confidence.
 
 ### 5. Inspect Persisted Incidents (`inspect`)
 Queries the SQLite Knowledge Plane to audit tower findings, event bus histories, and certified final reports for an incident.

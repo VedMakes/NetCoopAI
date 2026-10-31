@@ -166,8 +166,24 @@ def reason_about_symptom(symptom: str, report: FinalReport) -> SymptomReasoning:
     ))
     expected = set().union(*(domain_faults[domain] for domain in domains)) if domains else set()
     matched = sorted(expected & diagnosed)
+    weak_support = (
+        report.confidence < 0.7
+        or report.confidence_category.value in {"low", "insufficient"}
+        or any(
+            "single evidence stream" in limitation.casefold()
+            or "limited temporal support" in limitation.casefold()
+            for limitation in report.limitations
+        )
+    )
 
-    if not domains or not diagnosed or ("connectivity" in domains and len(expected) > 3):
+    if weak_support:
+        status = "unclear"
+        explanation = (
+            "The symptom overlaps with a possible fault category, but the published diagnosis has "
+            "limited evidence or confidence. Treat this comparison as unclear; the diagnosis was "
+            "made independently and was not changed."
+        )
+    elif not domains or not diagnosed or ("connectivity" in domains and len(expected) > 3):
         status = "unclear"
         explanation = (
             "The symptom wording is too broad for a reliable rule-based comparison. "

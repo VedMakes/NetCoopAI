@@ -380,8 +380,9 @@ def test_fabric_end_to_end_peer_queries(memory_repo: SQLiteRepository, sample_ut
     res2 = fabric.query_peer(q2)
     assert res2.status == QueryStatus.COMPLETED
     assert res2.result is not None
-    assert res2.result["entity_id"] == "SW_CORE"
-    assert res2.result["operational_status"] == "UP"
+    # Topology alone does not prove operational health.
+    assert res2.result["status"] == "unknown"
+    assert any("No matching metric evidence" in warning for warning in res2.warnings)
 
 
 def test_fabric_four_towers_run_on_shared_incident(memory_repo: SQLiteRepository, sample_utc: datetime):

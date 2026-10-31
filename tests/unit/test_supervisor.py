@@ -36,7 +36,7 @@ from netcoop.supervisor.models import (
     IncidentLifecycleState,
     InvestigationBudget,
 )
-from netcoop.supervisor.runtime import EvidenceGateRejectionError, SupervisorRuntime
+from netcoop.supervisor.runtime import SupervisorRuntime
 
 
 @pytest.fixture
@@ -358,14 +358,36 @@ def test_supervisor_conflict_classification_and_task_dispatch():
     # In round 1 with competing hypotheses, provider requests discriminating evidence
     assert proposal.decision == ProposalDecision.REQUEST_EVIDENCE
     assert len(proposal.requested_tasks) > 0
-    assert proposal.requested_tasks[0]["capability"] == "INVESTIGATE_DEVICE"
-    assert proposal.requested_tasks[0]["assignee"] == TowerId.INFRASTRUCTURE.value
-    assert proposal.requested_tasks[0]["objective"]["target_entities"] == ["SW_DIST_1:Gi0/1", "SW_DIST_1"]
+    assert {task["capability"] for task in proposal.requested_tasks} == {
+        "performance.challenge_congestion_hypothesis",
+        "infrastructure.challenge_device_overload_hypothesis",
+    }
+    assert {task["assignee"] for task in proposal.requested_tasks} == {
+        TowerId.PERFORMANCE.value,
+        TowerId.INFRASTRUCTURE.value,
+    }
+    assert {task["objective"]["hypothesis_code"] for task in proposal.requested_tasks} == {
+        "LINK_CONGESTION", "DEVICE_OVERLOAD"
+    }
     assert manifest.contradiction_ids == ["LINK_CONGESTION", "DEVICE_OVERLOAD"]
 
     # In round 2 with task history, provider arbitrates
     dossier.investigation_round = 2
-    dossier.task_history.append({"status": "COMPLETED", "result": {"cpu_sustained": True}})
+    dossier.task_history.extend([
+        {"status": "COMPLETED", "result": {"hypothesis_review": {
+            "hypothesis_code": "LINK_CONGESTION", "status": "supported",
+            "supporting_evidence_refs": ["OBS-C1"], "contradicting_evidence_refs": [],
+            "missing_measurements": [], "discriminating_measurement": "queue drops over time",
+            "summary": "Queue pressure supported by observations.",
+        }}},
+        {"status": "COMPLETED", "result": {"hypothesis_review": {
+            "hypothesis_code": "DEVICE_OVERLOAD", "status": "weakened",
+            "supporting_evidence_refs": [], "contradicting_evidence_refs": ["OBS-C2"],
+            "missing_measurements": ["repeated CPU samples"],
+            "discriminating_measurement": "CPU samples across the incident window",
+            "summary": "The lone CPU observation does not establish sustained overload.",
+        }}},
+    ])
     proposal2, manifest2 = provider.diagnose(dossier)
 
     assert proposal2.decision == ProposalDecision.PROPOSE_DIAGNOSIS
@@ -518,26 +540,70 @@ def test_fake_llm_provider_and_fallback_mechanics(sample_incident_observations: 
     assert "LINK_CONGESTION" in report.suspected_root_cause
 
 
-def test_gate_rejection_raises_evidence_gate_rejection_error(memory_repo: SQLiteRepository):
-    """Verifies that an unpublishable proposal raises EvidenceGateRejectionError in runtime."""
+def test_gate_rejection_exposes_actionable_retry_issue(memory_repo: SQLiteRepository):
+    """Gate failures carry machine-readable feedback for the bounded retry path."""
     runtime = SupervisorRuntime(repository=memory_repo)
-
-    # Empty proposal decision with missing root cause
     invalid_proposal = SupervisorProposal(
         proposal_id="PROP-INVALID",
         incident_id="INC-INVALID",
         decision=ProposalDecision.PROPOSE_DIAGNOSIS,
-        suspected_root_cause="",  # Empty root cause violates gate check
+        suspected_root_cause="LINK_CONGESTION",
         affected_entities=[],
-        supporting_finding_refs=[],  # Missing findings violates gate check
+        supporting_finding_refs=[],
         confidence_category=ConfidenceCategory.MODERATE,
         created_at=datetime.now(timezone.utc),
     )
 
-    with pytest.raises(EvidenceGateRejectionError) as exc_info:
-        runtime.gate.evaluate(invalid_proposal, incident_id="INC-INVALID")
-        # Trigger runtime failure path directly
-        if not runtime.gate.evaluate(invalid_proposal, incident_id="INC-INVALID").passed:
-            raise EvidenceGateRejectionError("Gate rejected")
+    result = runtime.gate.evaluate(invalid_proposal, incident_id="INC-INVALID")
+    assert result.passed is False
+    assert {issue.code for issue in result.issues} >= {"missing_support"}
+    assert all(issue.check_name for issue in result.issues)
 
-    assert "Gate rejected" in str(exc_info.value)
+
+def test_runtime_retries_gate_once_after_invalid_citation(sample_incident_observations: list):
+    """A retry can repair a citation once; the first rejected proposal is never published."""
+
+    class RetryCitationProvider:
+        calls = 0
+
+        def diagnose(self, dossier):
+            self.calls += 1
+            proposal, manifest = DeterministicRCAProvider().diagnose(dossier)
+            if self.calls == 1 and proposal.decision == ProposalDecision.PROPOSE_DIAGNOSIS:
+                manifest = manifest.model_copy(update={"observation_ids": ["OBS-NOT-IN-INCIDENT"]})
+            return proposal, manifest
+
+    provider = RetryCitationProvider()
+    runtime = SupervisorRuntime(rca_agent=provider)
+    report = runtime.run_incident(
+        "INC-2026-001", sample_incident_observations, symptom="Intermittent connectivity"
+    )
+
+    assert provider.calls == 2
+    assert runtime.supervisor_calls == 2
+    assert report.status == "diagnosed"
+    assert runtime.state == IncidentLifecycleState.PUBLISHED
+
+
+def test_runtime_abstains_when_gate_retry_does_not_resolve_issue(sample_incident_observations: list):
+    """A repeated invalid citation is bounded to one retry and safely abstains."""
+
+    class PersistentlyInvalidProvider:
+        calls = 0
+
+        def diagnose(self, dossier):
+            self.calls += 1
+            proposal, manifest = DeterministicRCAProvider().diagnose(dossier)
+            if proposal.decision == ProposalDecision.PROPOSE_DIAGNOSIS:
+                manifest = manifest.model_copy(update={"observation_ids": ["OBS-STILL-MISSING"]})
+            return proposal, manifest
+
+    provider = PersistentlyInvalidProvider()
+    runtime = SupervisorRuntime(rca_agent=provider)
+    report = runtime.run_incident("INC-2026-001", sample_incident_observations)
+
+    assert provider.calls == 2
+    assert runtime.supervisor_calls == 2
+    assert report.status == "insufficient_evidence"
+    assert "ABSTAIN" in report.suspected_root_cause
+    assert runtime.state == IncidentLifecycleState.ABSTAINED

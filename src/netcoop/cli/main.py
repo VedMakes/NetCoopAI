@@ -79,6 +79,7 @@ CLI_THEME = Theme({
     "progress.percentage": "#C7A7EF",
 })
 console = Console(theme=CLI_THEME)
+explain_console = Console(theme=CLI_THEME, stderr=True)
 
 
 def make_table(*args: Any, **kwargs: Any) -> Table:
@@ -613,6 +614,9 @@ def diagnose(
     symptom: str | None = typer.Option(
         None, "--symptom", help="Optional caller-reported concern; compared after diagnosis and never steers it."
     ),
+    explain: bool = typer.Option(
+        False, "--explain", help="Stream the live diagnostic workflow and agent handoffs to stderr."
+    ),
 ):
     """Executes end-to-end incident diagnosis across all 4 towers and the Evidence Release Gate."""
     data_quality_warnings: list[str] = []
@@ -680,7 +684,17 @@ def diagnose(
             {"profile_id": network_profile.profile_id, "version": network_profile.version}
             if network_profile else None
         ),
+        explain=(lambda stage, message: explain_console.print(f"[bright_cyan]✦ {stage}[/bright_cyan]  {message}"))
+        if explain else None,
     )
+
+    if explain:
+        explain_console.print(Panel(
+            f"Incident [bold]{inc_id}[/bold] · {len(observations)} observations\n"
+            f"Input: {target_path} · towers receive the shared normalized observation set\n"
+            "Agent rationale is shown as concise findings and evidence summaries, not private chain-of-thought.",
+            title="Live diagnostic trace", border_style="magenta",
+        ))
 
     try:
         if format_opt.lower() == "rich":
@@ -697,6 +711,8 @@ def diagnose(
             repo.insert_final_report(report)
         if symptom is not None:
             symptom_agent = SymptomReasoningAgent(llm_mode=llm)
+            if explain:
+                explain_console.print("[bright_cyan]✦ symptom[/bright_cyan]  Running optional symptom comparison after the evidence gate; it cannot change the diagnosis.")
             if format_opt.lower() == "rich":
                 with _soft_status("Comparing caller wording with the published evidence"):
                     symptom_addendum = symptom_agent.analyze(
@@ -713,6 +729,8 @@ def diagnose(
                     tower_reports=repo.get_tower_reports(inc_id),
                 )
             report = report.model_copy(update={"symptom_reasoning": symptom_addendum})
+            if explain:
+                explain_console.print(f"[bright_cyan]✦ symptom[/bright_cyan]  Result: {symptom_addendum.status}; {symptom_addendum.explanation}")
             repo.insert_final_report(report)
         gate_res = repo.get_gate_result(inc_id)
     except EvidenceGateRejectionError as e:

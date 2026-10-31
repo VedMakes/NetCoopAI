@@ -158,7 +158,26 @@ class SymptomReasoningAgent:
     ) -> SymptomReasoning:
         """Return a standalone symptom note; failure never changes the diagnosis."""
         try:
-            return self.provider.analyze(symptom, report, observations, tower_reports)
+            result = self.provider.analyze(symptom, report, observations, tower_reports)
+            weak_support = (
+                report.confidence < 0.7
+                or report.confidence_category.value in {"low", "insufficient"}
+                or any(
+                    "single evidence stream" in limitation.casefold()
+                    or "limited temporal support" in limitation.casefold()
+                    for limitation in report.limitations
+                )
+            )
+            if weak_support and result.status != "unclear":
+                return result.model_copy(update={
+                    "status": "unclear",
+                    "explanation": (
+                        "The symptom overlaps with a possible fault category, but the published diagnosis "
+                        "has limited evidence or confidence. Treat this comparison as unclear; "
+                        "the diagnosis was made independently and was not changed."
+                    ),
+                })
+            return result
         except Exception as exc:
             logger.warning("Symptom context agent failed; using deterministic fallback: %s", exc)
             from netcoop.supervisor.supplementary import reason_about_symptom

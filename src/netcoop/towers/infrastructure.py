@@ -30,7 +30,7 @@ from netcoop.models.observations import (
 )
 from netcoop.models.reports import TowerReport
 from netcoop.storage.sqlite import SQLiteRepository
-from netcoop.towers.base import investigate_with_engine
+from netcoop.towers.base import investigate_with_engine, query_incident_observations
 from netcoop.towers.rules import load_rules
 from netcoop.utils.id_generator import generate_id
 
@@ -92,11 +92,13 @@ class InfrastructureEngine:
         cpu_warn = float(self.rules.get("cpu_warning_pct", 75.0))
         mem_crit = float(self.rules.get("memory_critical_pct", 90.0))
 
-        max_cpu = max([o.value for o in cpu_obs], default=0.0)
-        max_mem = max([o.value for o in mem_obs], default=0.0)
+        max_cpu = max((o.value for o in cpu_obs), default=None)
+        max_mem = max((o.value for o in mem_obs), default=None)
+        cpu_peak = max_cpu if max_cpu is not None else float("-inf")
+        mem_peak = max_mem if max_mem is not None else float("-inf")
 
-        is_overload = max_cpu >= cpu_crit or max_mem >= mem_crit
-        is_warning = max_cpu >= cpu_warn or max_mem >= float(self.rules.get("memory_warning_pct", 80.0))
+        is_overload = cpu_peak >= cpu_crit or mem_peak >= mem_crit
+        is_warning = cpu_peak >= cpu_warn or mem_peak >= float(self.rules.get("memory_warning_pct", 80.0))
 
         if is_overload:
             evidence_obs = [
@@ -106,9 +108,22 @@ class InfrastructureEngine:
             ]
             evidence_ids = list(dict.fromkeys([o.observation_id for o in evidence_obs]))
 
-            sev = Severity.CRITICAL if (max_cpu >= 95.0 or max_mem >= 95.0) else Severity.HIGH
-            conf = 0.92 if sev == Severity.CRITICAL else 0.85
-            conf_cat = ConfidenceCategory.HIGH
+            observed_times = {o.timestamp for o in cpu_obs + mem_obs}
+            repeated = len(observed_times) >= 2
+            corroborated_metrics = bool(cpu_obs and mem_obs)
+            sev = Severity.CRITICAL if (cpu_peak >= 95.0 or mem_peak >= 95.0) else Severity.HIGH
+            conf = 0.92 if repeated and corroborated_metrics else 0.72 if repeated else 0.45
+            conf_cat = (
+                ConfidenceCategory.HIGH if repeated and corroborated_metrics
+                else ConfidenceCategory.MODERATE if repeated
+                else ConfidenceCategory.LOW
+            )
+            # A one-poll extreme is worth flagging, but does not establish a persistent outage.
+            if not repeated and sev == Severity.CRITICAL:
+                sev = Severity.HIGH
+
+            cpu_text = f"{max_cpu:.1f}%" if max_cpu is not None else "not observed"
+            mem_text = f"{max_mem:.1f}%" if max_mem is not None else "not observed"
 
             f_id = generate_id("F-INFRA")
             now = datetime.now(timezone.utc)
@@ -127,10 +142,12 @@ class InfrastructureEngine:
                 observed_at=(cpu_obs[-1] if cpu_obs else mem_obs[-1]).timestamp,
                 created_at=now,
                 description=(
-                    f"Severe resource exhaustion on {entity_id}: peak CPU {max_cpu:.1f}%, "
-                    f"peak memory {max_mem:.1f}%."
+                    f"Resource threshold exceeded on {entity_id}: peak CPU {cpu_text}, "
+                    f"peak memory {mem_text}; {len(observed_times)} distinct sample time(s)."
                 ),
-                metadata={"max_cpu_pct": max_cpu, "max_memory_pct": max_mem},
+                metadata={"max_cpu_pct": max_cpu, "max_memory_pct": max_mem,
+                          "sample_count": len(observed_times), "cpu_observed": bool(cpu_obs),
+                          "memory_observed": bool(mem_obs)},
             )
             findings.append(finding)
 
@@ -145,7 +162,7 @@ class InfrastructureEngine:
                 confidence_category=conf_cat,
                 rationale=(
                     f"Hardware utilization thresholds exceeded on {entity_id} "
-                    f"(CPU {max_cpu:.1f}%, memory {max_mem:.1f}%) causing device processing degradation."
+                    f"(CPU {cpu_text}, memory {mem_text}) causing device processing degradation."
                 ),
                 created_at=now,
             )
@@ -153,6 +170,8 @@ class InfrastructureEngine:
 
         elif is_warning:
             evidence_ids = [o.observation_id for o in (cpu_obs + mem_obs)]
+            cpu_text = f"{max_cpu:.1f}%" if max_cpu is not None else "not observed"
+            mem_text = f"{max_mem:.1f}%" if max_mem is not None else "not observed"
             f_id = generate_id("F-INFRA")
             now = datetime.now(timezone.utc)
             findings.append(
@@ -170,7 +189,7 @@ class InfrastructureEngine:
                     independence_group=f"hardware:resource:{entity_id}",
                     observed_at=(cpu_obs[-1] if cpu_obs else mem_obs[-1]).timestamp,
                     created_at=now,
-                    description=f"Moderate resource utilization on {entity_id} (CPU {max_cpu:.1f}%, memory {max_mem:.1f}%).",
+                    description=f"Elevated resource utilization on {entity_id} (CPU {cpu_text}, memory {mem_text}).",
                     metadata={"max_cpu_pct": max_cpu, "max_memory_pct": max_mem},
                 )
             )
@@ -254,6 +273,11 @@ class InfrastructureEngine:
 
         for obs in log_obs:
             msg_lower = obs.message.lower()
+            # Service protocol failures are analyzed by the Services tower; a
+            # generic ERROR level must not turn them into hardware overloads.
+            service_terms = ("servfail", "nxdomain", "dns", "dhcp", "pool_full", "lease")
+            if any(term in msg_lower for term in service_terms):
+                continue
             is_matching_level = obs.log_level.upper() in error_levels
             has_error_keyword = any(kw in msg_lower for kw in keywords)
 
@@ -358,22 +382,59 @@ class InfrastructureTower:
         """Handles bounded, read-only peer queries for infrastructure health."""
         now = datetime.now(timezone.utc)
         if query.capability in ("infrastructure.check_device_health", "infrastructure.query_interface_health"):
-            target = query.scope[0] if query.scope else "unknown"
+            if not query.scope:
+                return PeerQueryResult(
+                    query_id=query.query_id, status=QueryStatus.INVALID_SCOPE,
+                    warnings=[f"{query.capability} requires an entity scope."], completed_at=now,
+                )
+            scoped = query_incident_observations(self.repo, query)
+            findings, hypotheses = self.engine.analyze(query.incident_id, scoped)
+            relevant = [finding for finding in findings if any(
+                entity in query.scope or any(entity.startswith(f"{target}:") for target in query.scope)
+                for entity in finding.entity_refs
+            )]
+            refs = list(dict.fromkeys(ref for finding in relevant for ref in finding.evidence_refs))
+            metrics = [obs for obs in scoped if isinstance(obs, MetricObservation)]
+            relevant_metric_names = (
+                {"cpu_utilization_pct", "memory_utilization_pct"}
+                if query.capability == "infrastructure.check_device_health"
+                else {"interface_errors", "link_flaps"}
+            )
+            relevant_metrics = [item for item in metrics if item.metric_name in relevant_metric_names]
             return PeerQueryResult(
                 query_id=query.query_id,
                 status=QueryStatus.COMPLETED,
-                result={"entity_id": target, "operational_status": "UP"},
-                evidence_refs=[],
-                warnings=[],
+                result={
+                    "entities": query.scope,
+                    "status": "degraded" if relevant else "unknown" if not relevant_metrics else "no_threshold_breach_observed",
+                    "metric_observation_count": len(relevant_metrics),
+                    "findings": [finding.model_dump(mode="json") for finding in relevant],
+                    "hypotheses": [hyp.model_dump(mode="json") for hyp in hypotheses if any(
+                        entity in query.scope or any(entity.startswith(f"{target}:") for target in query.scope)
+                        for entity in hyp.suspected_entities
+                    )],
+                },
+                evidence_refs=refs,
+                warnings=[] if relevant_metrics else ["No matching metric evidence was available; device state is unknown."],
                 completed_at=now,
             )
         elif query.capability == "infrastructure.analyze_logs":
+            if not query.scope:
+                return PeerQueryResult(
+                    query_id=query.query_id, status=QueryStatus.INVALID_SCOPE,
+                    warnings=["infrastructure.analyze_logs requires an entity scope."],
+                    completed_at=now,
+                )
+            scoped = query_incident_observations(self.repo, query)
+            log_items = [obs for obs in scoped if isinstance(obs, LogObservation)]
+            findings, _ = self.engine.analyze(query.incident_id, log_items)
+            refs = list(dict.fromkeys(ref for finding in findings for ref in finding.evidence_refs))
             return PeerQueryResult(
                 query_id=query.query_id,
                 status=QueryStatus.COMPLETED,
-                result={"error_logs_count": 0},
-                evidence_refs=[],
-                warnings=[],
+                result={"error_logs_count": len(findings), "findings": [item.model_dump(mode="json") for item in findings]},
+                evidence_refs=refs,
+                warnings=[] if log_items else ["No matching log observations were available."],
                 completed_at=now,
             )
         else:
