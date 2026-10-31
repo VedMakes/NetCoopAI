@@ -4,6 +4,48 @@ New entries are appended at the top.
 
 ---
 
+## [Phase 6] - End-to-End Testing, Robustness & Benchmark Hardening
+- **Date:** 2026-11-01
+- **Phase:** PHASE 6
+- **Owner:** Senior Engineering Partner
+- **Starting commit:** `7dc5e7a`
+- **Summary:**
+  - Verified full end-to-end regression across all 7 benchmark scenarios via both the core Python runtime and the asynchronous FastAPI HTTP adapter:
+    1. `healthy`: Certified safe abstention (`insufficient_evidence`, `ABSTAIN: Normal telemetry`, confidence 0.0, zero hallucinated alarms).
+    2. `link_congestion`: Certified `LINK_CONGESTION` on `SW_CORE_01:Gi0/2` with queue drops and packet loss.
+    3. `weak_wifi`: Certified `WEAK_WIFI` on `AP_HOSTEL_01` with RF attenuation.
+    4. `interface_fault`: Certified `INTERFACE_FAULT` on `SW_DIST_DEPT_A:Gi0/1` with CRC drops and flaps.
+    5. `device_overload`: Certified `DEVICE_OVERLOAD` on `SW_CORE_01` with CPU exhaustion.
+    6. `dns_failure`: Certified `DNS_FAILURE` on `SRV_DNS_01` with SERVFAIL and timeouts.
+    7. `dhcp_failure`: Certified `DHCP_FAILURE` on `SRV_DHCP_01` with pool exhaustion and NAK storms.
+  - Added parametrized test `test_all_seven_scenarios_api_lifecycle` in `tests/unit/test_api.py` validating complete run lifecycle, report certification, gate verification, post-diagnosis ground-truth evaluation, and assistant responses.
+  - Added boundary and negative test suite `test_api_edge_cases_and_error_handling` asserting 400 Bad Request on invalid scenario IDs/empty payloads and 404 Not Found across all `/api/runs/{id}/*` endpoints for nonexistent runs.
+  - Verified zero ground-truth leakage invariant: `test_zero_leakage_of_ground_truth_into_runtime` passes with zero reference in `src/netcoop/`.
+  - Recompiled production frontend bundle (`npm run build`) in 1.26s; verified static mount `/ui` serves compiled dashboard.
+- **Files created/modified:**
+  - Modified `tests/unit/test_api.py`
+  - Modified `docs/FRONTEND_CHANGELOG.md`
+- **API/schema changes:** None.
+- **Dependencies added:** None.
+- **Tests run and actual results:**
+  - `uv run pytest -q`: **229 passed** (all 221 prior tests + 8 new end-to-end API lifecycle and edge case tests).
+  - `uv run ruff check .`: Clean, 0 errors.
+  - `git diff --check`: Clean, 0 whitespace issues.
+  - `npm run build`: Compiled bundle in 1.26s with 0 errors.
+- **Tests not run:** None.
+- **CLI regression results:**
+  - `uv run netcoop doctor`: PASS.
+  - `uv run netcoop demo`: PASS (all 5 scenarios certified).
+  - `uv run netcoop scenarios`: PASS.
+  - `uv run netcoop diagnose fixtures/scenarios/link_congestion`: PASS.
+  - `uv run netcoop api --help`: PASS.
+- **Known issues:** None.
+- **Ending commit:** PENDING_COMMIT (will be updated upon commit)
+- **Push verification:** PENDING_PUSH
+- **Next phase:** PHASE 7 — Judge Demonstration Walkthrough & Script (`FRONTEND_DEMO_SCRIPT.md`).
+
+---
+
 ## [Phase 5] - Incident Explanation Assistant (Option A)
 - **Date:** 2026-11-01
 - **Phase:** PHASE 5

@@ -205,3 +205,88 @@ def test_evaluation_quarantine_before_completion(client: TestClient):
     # Non-existent run
     err_res = client.get("/api/runs/run-nonexistent/evaluation")
     assert err_res.status_code == 400
+
+
+@pytest.mark.parametrize(
+    "scenario_id,expected_fault,is_healthy",
+    [
+        ("healthy", "HEALTHY", True),
+        ("link_congestion", "LINK_CONGESTION", False),
+        ("weak_wifi", "WEAK_WIFI", False),
+        ("interface_fault", "INTERFACE_FAULT", False),
+        ("device_overload", "DEVICE_OVERLOAD", False),
+        ("dns_failure", "DNS_FAILURE", False),
+        ("dhcp_failure", "DHCP_FAILURE", False),
+    ],
+)
+def test_all_seven_scenarios_api_lifecycle(
+    client: TestClient, scenario_id: str, expected_fault: str, is_healthy: bool
+):
+    """End-to-end API regression verifying all 7 benchmark scenarios execute cleanly."""
+    # 1. Create run
+    res = client.post("/api/runs", json={"scenario_id": scenario_id, "llm": "off"})
+    assert res.status_code == 201
+    run_id = res.json()["run_id"]
+
+    # 2. Poll until completion (max 6s)
+    completed = False
+    for _ in range(30):
+        st = client.get(f"/api/runs/{run_id}").json()
+        if st["status"] == "completed":
+            completed = True
+            break
+        elif st["status"] == "failed":
+            pytest.fail(f"Scenario {scenario_id} failed: {st.get('error')}")
+        time.sleep(0.2)
+
+    assert completed, f"Scenario {scenario_id} did not complete within timeout"
+
+    # 3. Report verification
+    rep = client.get(f"/api/runs/{run_id}/report").json()
+    if is_healthy:
+        assert rep["status"] == "insufficient_evidence"
+        assert "ABSTAIN" in rep["suspected_root_cause"]
+    else:
+        assert rep["status"] == "diagnosed"
+        assert expected_fault in rep["suspected_root_cause"]
+
+    # 4. Gate verification
+    gate = client.get(f"/api/runs/{run_id}/gate").json()
+    assert gate["passed"] is True
+    if is_healthy:
+        assert gate["outcome"] in ("ABSTAIN", "PASS", "PASS_WITH_LIMITATIONS")
+    else:
+        assert "PASS" in gate["outcome"]
+
+    # 5. Evaluation against ground truth
+    ev = client.get(f"/api/runs/{run_id}/evaluation").json()
+    assert ev["class_match"] is True
+
+    # 6. Assistant explanation
+    asst = client.post(
+        f"/api/runs/{run_id}/assistant",
+        json={"question": "Explain this result", "llm": "off"},
+    ).json()
+    assert len(asst["answer"]) > 20
+    assert asst["provider_used"] == "deterministic"
+
+
+def test_api_edge_cases_and_error_handling(client: TestClient):
+    """Verifies edge cases, malformed payloads, and 404/400 safety boundaries."""
+    # Invalid scenario
+    inv_res = client.post("/api/runs", json={"scenario_id": "nonexistent_scenario_xyz"})
+    assert inv_res.status_code == 400
+
+    # Missing payload parameters
+    empty_res = client.post("/api/runs", json={})
+    assert empty_res.status_code == 400
+
+    # Non-existent run 404s
+    assert client.get("/api/runs/nonexistent-run-999").status_code == 404
+    assert client.get("/api/runs/nonexistent-run-999/telemetry").status_code == 404
+    assert client.get("/api/runs/nonexistent-run-999/topology").status_code == 404
+    assert client.get("/api/runs/nonexistent-run-999/events").status_code == 404
+    assert client.get("/api/runs/nonexistent-run-999/findings").status_code == 404
+    assert client.get("/api/runs/nonexistent-run-999/tasks").status_code == 404
+    assert client.get("/api/runs/nonexistent-run-999/report").status_code == 404
+    assert client.get("/api/runs/nonexistent-run-999/gate").status_code == 404
