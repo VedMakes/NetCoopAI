@@ -4,12 +4,12 @@
 
 - **Current phase:** Phase 6
 - **Phase title:** Supervisor runtime, Supervisory RCA Agent and Evidence Gate
-- **Status:** `IN_PROGRESS`
+- **Status:** `AWAITING_REVIEW`
 - **Implementation owner:** Friend A
 - **Reviewer:** Friend B
 - **Shared branch:** `hackathon/team-integration`
 - **Last accepted phase:** Phase 5 (VERIFIED by Friend A)
-- **Latest implementation commit:** None (Phase 6 in progress)
+- **Latest implementation commit:** (pending commit)
 - **Latest review commit:** Review of Phase 5 completed
 - **Blocking issues:** None recorded
 - **Next phase:** Phase 7, owned by Friend B
@@ -30,10 +30,10 @@
 - [x] Reviewer independently verified Phase 5 handoff.
 - [x] Owner inspected repository, tools, and docs.
 - [x] Shared branch `hackathon/team-integration` active.
-- [ ] Implementation completed.
-- [ ] Required tests run and recorded.
-- [ ] Owner appended implementation handoff to `COLLAB_LOG.md`.
-- [ ] Owner pushed commit to shared branch.
+- [x] Implementation completed.
+- [x] Required tests run and recorded.
+- [x] Owner appended implementation handoff to `COLLAB_LOG.md`.
+- [x] Owner pushed commit to shared branch.
 - [ ] Reviewer pulled exact commit.
 - [ ] Reviewer independently ran checks.
 - [ ] Reviewer appended verdict to `COLLAB_LOG.md`.
@@ -49,6 +49,6 @@
 | 3 | Friend B | Friend A | VERIFIED |
 | 4 | Friend A | Friend B | VERIFIED |
 | 5 | Friend B | Friend A | VERIFIED |
-| 6 | Friend A | Friend B | IN_PROGRESS |
+| 6 | Friend A | Friend B | AWAITING_REVIEW |
 | 7 | Friend B | Friend A | NOT_STARTED |
 | 8 | Friend A | Friend B | NOT_STARTED |

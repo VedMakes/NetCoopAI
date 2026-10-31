@@ -955,6 +955,99 @@ All Phase 5 exit criteria are completely satisfied:
 
 ---
 
+## Phase 6 implementation handoff: Supervisor runtime, RCA agent and evidence gate
+
+- Date/time (ISO 8601): 2026-10-31T14:15:00Z
+- Implementation owner: Friend A
+- Assigned reviewer: Friend B
+- Branch: `hackathon/team-integration`
+- Base commit SHA: `b360e40`
+- Result commit SHA: (pending commit)
+- Status: `AWAITING_REVIEW`
+
+### Scope completed
+
+- Verified session designation: `TEAMMATE_ID = A` (Friend A).
+- Implemented deterministic `SupervisorRuntime` and incident state machine in `src/netcoop/supervisor/runtime.py`:
+  - Incident state machine: `CREATED -> TOWERS_RUNNING -> TOWERS_EVALUATED -> SUPERVISOR_REASONING -> INVESTIGATING -> PROPOSED -> GATE_EVALUATING -> PUBLISHED / ABSTAINED / FAILED`.
+  - Ingestion and multi-tower orchestration: calls `IntegrationFabric.run_all_towers`, gathers 4 domain reports, and persists into SQLite.
+  - Compact context synthesis: builds `IncidentDossier` containing minimal structured findings, hypotheses, affected entities, and registry capabilities without sending raw telemetry dumps to reasoning components.
+  - Task budgeting and authorization: strictly enforces `InvestigationBudget` limits (`max_supervisor_calls=2`, `max_investigation_rounds=2`, `max_tasks=6`).
+  - Investigation loop: dispatches supervisor-authorized investigation tasks through `fabric.create_task` and `fabric.dispatch_task` on ambiguity, updates task history, and triggers round 2 diagnosis.
+- Implemented `SupervisoryRCAAgent` and arbitration providers in `src/netcoop/supervisor/agent.py`:
+  - `DeterministicRCAProvider`: 100% deterministic arbitration and cross-domain reasoning without LLM dependencies.
+  - Conflict classification: identifies disagreements across towers (`ConflictType.CAUSAL`, `ConflictType.DOMAIN_INTERPRETATION`, etc.), such as Link Congestion vs Device Overload or DNS Failure vs Routing Failure.
+  - Causal priority ranking: weights configuration drift, hardware/overload faults, routing partitions, service faults, congestion, and wireless degradation to identify primary root cause.
+  - Structured output: constructs `SupervisorProposal` and `ClaimEvidenceManifest` citing valid finding and observation IDs.
+  - Safe abstention: returns `ProposalDecision.ABSTAIN` when telemetry is normal or when conflicting hypotheses have zero corroboration.
+  - `FakeLLMProvider` and pluggable adapter interface: supports simulated provider testing and graceful fallback to deterministic arbitration.
+- Implemented independent `EvidenceReleaseGate` in `src/netcoop/supervisor/gate.py`:
+  - Verifies objective publication criteria:
+    - Evidence existence: rejects invented or missing observation IDs (`OBS-INVENTED-*`) and finding references.
+    - Incident scope: rejects citations from foreign incidents.
+    - Finding status: rejects citations to `SUPERSEDED` or `RETRACTED` findings.
+    - Provenance: verifies findings trace to non-empty observation references.
+    - Contradiction disclosure: ensures competing hypotheses are disclosed in `alternative_causes` or manifest contradiction disclosures.
+    - Independence groups: validates corroboration across independent evidence groups and downgrades uncorroborated single-source claims.
+    - Output certification: generates certified `FinalReport` on pass or abstention; raises `EvidenceGateRejectionError` on rejection to prevent publication of unverified diagnoses.
+- Extended SQLite repository in `src/netcoop/storage/sqlite.py`:
+  - Added `supervisor_proposals` and `gate_results` tables with indexed querying and transactional persistence.
+- Comprehensive Unit Test Suite (9 new unit tests, 126 total unit tests passing):
+  - `tests/unit/test_supervisor.py`:
+    - `test_supervisor_runtime_end_to_end_on_incident`
+    - `test_evidence_gate_rejects_invented_observation_ids`
+    - `test_evidence_gate_rejects_superseded_or_retracted_findings`
+    - `test_evidence_gate_rejects_wrong_incident_evidence`
+    - `test_supervisor_abstention_on_normal_telemetry`
+    - `test_supervisor_conflict_classification_and_task_dispatch`
+    - `test_supervisor_budget_exhaustion_limits_task_dispatch`
+    - `test_fake_llm_provider_and_fallback_mechanics`
+    - `test_gate_rejection_raises_evidence_gate_rejection_error`
+- Zero LLM dependencies required: LLM-off mode works completely offline and deterministically.
+
+### Files changed
+
+- `src/netcoop/supervisor/__init__.py`: Exported supervisor runtime, RCA agent, gate, and models.
+- `src/netcoop/supervisor/models.py`: IncidentLifecycleState, GateOutcome, GateResult, ConflictItem, IncidentDossier, InvestigationBudget.
+- `src/netcoop/supervisor/gate.py`: Independent EvidenceReleaseGate verifier.
+- `src/netcoop/supervisor/agent.py`: SupervisoryRCAAgent, DeterministicRCAProvider, FakeLLMProvider.
+- `src/netcoop/supervisor/runtime.py`: SupervisorRuntime incident lifecycle manager.
+- `src/netcoop/storage/sqlite.py`: Added supervisor_proposals and gate_results persistence.
+- `tests/unit/test_supervisor.py`: 9 comprehensive unit tests for supervisor, RCA agent, and evidence gate.
+- `docs/COLLAB_LOG.md`: Appended Phase 6 implementation handoff.
+- `COLLAB_LOG.md`: Synced with docs/COLLAB_LOG.md.
+- `docs/PHASE_STATUS.md`: Updated Phase 6 status to AWAITING_REVIEW.
+- `PHASE_STATUS.md`: Synced with docs/PHASE_STATUS.md.
+
+### Tests and commands actually run
+
+| Command | Result | Notes |
+|---|---|---|
+| `.venv/bin/pytest -v` | PASS | 126 of 126 unit tests passed in 1.12s |
+| `.venv/bin/ruff check .` | PASS | Clean, 0 errors |
+| `.venv/bin/netcoop doctor` | PASS | All 4 components OK |
+| `.venv/bin/netcoop validate fixtures/sample_incident.json` | PASS | 9/9 observations validated |
+| `.venv/bin/netcoop ingest fixtures/sample_incident.json` | PASS | Ingestion and 6 features validated |
+
+### Reviewer checklist
+
+- [ ] Inspect git diff and verify zero mandatory LLM calls in SupervisorRuntime and RCAAgent.
+- [ ] Run `pytest -v` independently (126 tests passing).
+- [ ] Run `ruff check .` independently.
+- [ ] Verify supervisor receives all 4 tower reports and owns the proposal.
+- [ ] Verify invented, stale, superseded, or foreign-incident evidence is strictly rejected by EvidenceReleaseGate.
+- [ ] Verify normal telemetry triggers clean abstention without hallucinated root causes.
+- [ ] Verify investigation budget limits task creation and rounds.
+- [ ] Verify Phase 6 exit criteria.
+
+### Next phase
+
+- Phase: Phase 7: CLI, reports and demo experience
+- Owner: Friend B
+- Reviewer: Friend A
+
+---
+
 ## Subsequent phases
 
 Append each implementation handoff and its review after the preceding phase has been verified. Do not replace this section with a rewritten summary.
