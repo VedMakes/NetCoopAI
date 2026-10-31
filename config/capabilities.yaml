@@ -1,0 +1,86 @@
+version: "1.0"
+towers:
+  performance:
+    name: "Performance Diagnostic Tower"
+    description: "Analyzes throughput, link utilization, latency, jitter, packet loss, and queue drops."
+    capabilities:
+      - id: "performance.analyze_metrics"
+        description: "Evaluates time-series metrics against statistical baselines and threshold signatures."
+        input_schema: "netcoop://schemas/capabilities/performance-analyze-metrics-input/1.0"
+        output_schema: "netcoop://schemas/capabilities/performance-analyze-metrics-output/1.0"
+        read_only: true
+      - id: "performance.query_metric_window"
+        description: "Returns aggregated metric statistics for a specific entity and time window."
+        input_schema: "netcoop://schemas/capabilities/performance-query-metric-input/1.0"
+        output_schema: "netcoop://schemas/capabilities/performance-query-metric-output/1.0"
+        read_only: true
+      - id: "performance.detect_congestion"
+        description: "Detects sustained congestion signatures combining queue drops and link saturation."
+        input_schema: "netcoop://schemas/capabilities/performance-detect-congestion-input/1.0"
+        output_schema: "netcoop://schemas/capabilities/performance-detect-congestion-output/1.0"
+        read_only: true
+
+  infrastructure:
+    name: "Infrastructure Health Tower"
+    description: "Analyzes device availability, CPU/memory utilization, interface errors, link flaps, and system logs."
+    capabilities:
+      - id: "infrastructure.check_device_health"
+        description: "Evaluates CPU, memory, power, and operational status of network hardware."
+        input_schema: "netcoop://schemas/capabilities/infrastructure-device-health-input/1.0"
+        output_schema: "netcoop://schemas/capabilities/infrastructure-device-health-output/1.0"
+        read_only: true
+      - id: "infrastructure.query_interface_health"
+        description: "Retrieves interface errors, CRC errors, link flaps, and queue drops."
+        input_schema: "netcoop://schemas/capabilities/infrastructure-interface-health-input/1.0"
+        output_schema: "netcoop://schemas/capabilities/infrastructure-interface-health-output/1.0"
+        read_only: true
+      - id: "infrastructure.analyze_logs"
+        description: "Parses structured syslog and hardware diagnostic events for error patterns."
+        input_schema: "netcoop://schemas/capabilities/infrastructure-analyze-logs-input/1.0"
+        output_schema: "netcoop://schemas/capabilities/infrastructure-analyze-logs-output/1.0"
+        read_only: true
+
+  connectivity:
+    name: "Connectivity and Topology Tower"
+    description: "Analyzes network topology, reachability paths, blast radius, and shared upstream dependencies."
+    capabilities:
+      - id: "connectivity.trace_path"
+        description: "Computes the topological path and intermediate hops between two network entities."
+        input_schema: "netcoop://schemas/capabilities/connectivity-trace-path-input/1.0"
+        output_schema: "netcoop://schemas/capabilities/connectivity-trace-path-output/1.0"
+        read_only: true
+      - id: "connectivity.find_common_uplink"
+        description: "Identifies common upstream switches, routers, or aggregated links for affected entities."
+        input_schema: "netcoop://schemas/capabilities/connectivity-find-common-uplink-input/1.0"
+        output_schema: "netcoop://schemas/capabilities/connectivity-find-common-uplink-output/1.0"
+        read_only: true
+      - id: "connectivity.query_neighbors"
+        description: "Returns adjacent devices and connecting links from the topology graph."
+        input_schema: "netcoop://schemas/capabilities/connectivity-query-neighbors-input/1.0"
+        output_schema: "netcoop://schemas/capabilities/connectivity-query-neighbors-output/1.0"
+        read_only: true
+      - id: "connectivity.analyze_blast_radius"
+        description: "Calculates the set of devices affected by an isolated or degraded node/link."
+        input_schema: "netcoop://schemas/capabilities/connectivity-blast-radius-input/1.0"
+        output_schema: "netcoop://schemas/capabilities/connectivity-blast-radius-output/1.0"
+        read_only: true
+
+  services:
+    name: "Services and Configuration Tower"
+    description: "Analyzes DNS resolution, DHCP lease states, routing configuration, and configuration drift."
+    capabilities:
+      - id: "services.check_dns"
+        description: "Evaluates DNS query success, latency, and resolver availability."
+        input_schema: "netcoop://schemas/capabilities/services-check-dns-input/1.0"
+        output_schema: "netcoop://schemas/capabilities/services-check-dns-output/1.0"
+        read_only: true
+      - id: "services.check_dhcp"
+        description: "Assesses DHCP lease allocation, pool exhaustion, and relay responsiveness."
+        input_schema: "netcoop://schemas/capabilities/services-check-dhcp-input/1.0"
+        output_schema: "netcoop://schemas/capabilities/services-check-dhcp-output/1.0"
+        read_only: true
+      - id: "services.query_config_drift"
+        description: "Compares current configuration against baseline snapshots to detect relevant drift."
+        input_schema: "netcoop://schemas/capabilities/services-query-config-drift-input/1.0"
+        output_schema: "netcoop://schemas/capabilities/services-query-config-drift-output/1.0"
+        read_only: true

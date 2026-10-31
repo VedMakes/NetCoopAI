@@ -1,0 +1,100 @@
+version: "1.0"
+
+metrics:
+  cpu_utilization_pct:
+    unit: "percent"
+    min: 0.0
+    max: 100.0
+    description: "CPU load percentage of the network device"
+  memory_utilization_pct:
+    unit: "percent"
+    min: 0.0
+    max: 100.0
+    description: "Memory utilization percentage"
+  link_utilization_pct:
+    unit: "percent"
+    min: 0.0
+    max: 100.0
+    description: "Link capacity utilization percentage"
+  packet_loss_pct:
+    unit: "percent"
+    min: 0.0
+    max: 100.0
+    description: "Packet loss percentage over the measurement interval"
+  latency_ms:
+    unit: "milliseconds"
+    min: 0.0
+    description: "Round-trip network latency in milliseconds"
+  jitter_ms:
+    unit: "milliseconds"
+    min: 0.0
+    description: "Variation in packet delay in milliseconds"
+  queue_drops:
+    unit: "count"
+    min: 0
+    description: "Count of dropped packets at egress queues"
+  interface_errors:
+    unit: "count"
+    min: 0
+    description: "Count of CRC, framing, or physical interface errors"
+  link_flaps:
+    unit: "count"
+    min: 0
+    description: "Number of state transitions between up and down"
+  bandwidth_mbps:
+    unit: "mbps"
+    min: 0.0
+    description: "Configured link bandwidth in megabits per second"
+  throughput_mbps:
+    unit: "mbps"
+    min: 0.0
+    description: "Observed data transfer rate in megabits per second"
+  rssi_dbm:
+    unit: "dbm"
+    description: "Received signal strength indication in dBm"
+  snr_db:
+    unit: "db"
+    description: "Signal-to-noise ratio in decibels"
+
+entity_types:
+  - "device"
+  - "interface"
+  - "link"
+  - "service"
+  - "hostel_zone"
+  - "access_point"
+
+finding_types:
+  - "congestion_candidate"
+  - "interface_degradation"
+  - "hardware_overload"
+  - "path_interruption"
+  - "uplink_saturation"
+  - "dns_resolution_failure"
+  - "dhcp_lease_exhaustion"
+  - "weak_wifi_signal"
+  - "config_drift_detected"
+
+severities:
+  - "info"
+  - "low"
+  - "medium"
+  - "high"
+  - "critical"
+
+confidence_categories:
+  - "insufficient"
+  - "low"
+  - "moderate"
+  - "high"
+
+fault_codes:
+  - "LINK_CONGESTION"
+  - "WEAK_WIFI"
+  - "INTERFACE_FAULT"
+  - "DEVICE_OVERLOAD"
+  - "DNS_FAILURE"
+  - "DHCP_FAILURE"
+  - "ROUTING_FAILURE"
+  - "CONFIG_DRIFT"
+  - "INSUFFICIENT_EVIDENCE"

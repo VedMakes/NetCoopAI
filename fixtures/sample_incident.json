@@ -1,0 +1,127 @@
+{
+  "incident_id": "INC-2026-001",
+  "title": "Suspected Campus Core Switch Congestion",
+  "created_at": "2026-10-31T12:00:00Z",
+  "observations": [
+    {
+      "observation_id": "OBS-000001",
+      "incident_id": "INC-2026-001",
+      "observation_type": "metric",
+      "source": "collector/synthetic_organizer",
+      "entity_id": "SW_CAMPUS_5",
+      "metric_name": "cpu_utilization_pct",
+      "value": 78.5,
+      "unit": "percent",
+      "timestamp": "2026-10-31T12:00:00Z",
+      "raw_reference": {
+        "generator": "reference/sample_generator.py",
+        "scenario": "latency_spike"
+      }
+    },
+    {
+      "observation_id": "OBS-000002",
+      "incident_id": "INC-2026-001",
+      "observation_type": "metric",
+      "source": "collector/synthetic_organizer",
+      "entity_id": "SW_CAMPUS_5:Gi0/1",
+      "metric_name": "link_utilization_pct",
+      "value": 94.2,
+      "unit": "percent",
+      "timestamp": "2026-10-31T12:00:00Z",
+      "raw_reference": {
+        "interface": "Gi0/1",
+        "speed_mbps": 1000.0
+      }
+    },
+    {
+      "observation_id": "OBS-000003",
+      "incident_id": "INC-2026-001",
+      "observation_type": "metric",
+      "source": "collector/synthetic_organizer",
+      "entity_id": "SW_CAMPUS_5:Gi0/1",
+      "metric_name": "queue_drops",
+      "value": 245.0,
+      "unit": "count",
+      "timestamp": "2026-10-31T12:00:00Z",
+      "raw_reference": {
+        "queue_id": "egress_q1"
+      }
+    },
+    {
+      "observation_id": "OBS-000004",
+      "incident_id": "INC-2026-001",
+      "observation_type": "metric",
+      "source": "collector/synthetic_organizer",
+      "entity_id": "SW_CAMPUS_5",
+      "metric_name": "latency_ms",
+      "value": 265.4,
+      "unit": "milliseconds",
+      "timestamp": "2026-10-31T12:00:00Z",
+      "raw_reference": {
+        "probe_target": "10.0.0.1"
+      }
+    },
+    {
+      "observation_id": "OBS-000005",
+      "incident_id": "INC-2026-001",
+      "observation_type": "metric",
+      "source": "collector/synthetic_organizer",
+      "entity_id": "SW_CAMPUS_5",
+      "metric_name": "packet_loss_pct",
+      "value": 1.25,
+      "unit": "percent",
+      "timestamp": "2026-10-31T12:00:00Z",
+      "raw_reference": {
+        "samples": 100
+      }
+    },
+    {
+      "observation_id": "OBS-000006",
+      "incident_id": "INC-2026-001",
+      "observation_type": "topology",
+      "source": "inventory/campus_cmdb",
+      "entity_id": "SW_CAMPUS_5",
+      "source_entity": "SW_CAMPUS_5",
+      "target_entity": "RTR_CORE_1",
+      "relationship_type": "uplink_of",
+      "link_speed_mbps": 10000.0,
+      "interface_name": "TenGi0/1",
+      "timestamp": "2026-10-31T12:00:00Z"
+    },
+    {
+      "observation_id": "OBS-000007",
+      "incident_id": "INC-2026-001",
+      "observation_type": "topology",
+      "source": "inventory/campus_cmdb",
+      "entity_id": "SW_CAMPUS_6",
+      "source_entity": "SW_CAMPUS_6",
+      "target_entity": "RTR_CORE_1",
+      "relationship_type": "uplink_of",
+      "link_speed_mbps": 10000.0,
+      "interface_name": "TenGi0/2",
+      "timestamp": "2026-10-31T12:00:00Z"
+    },
+    {
+      "observation_id": "OBS-000008",
+      "incident_id": "INC-2026-001",
+      "observation_type": "log",
+      "source": "syslog/SW_CAMPUS_5",
+      "entity_id": "SW_CAMPUS_5",
+      "log_level": "WARNING",
+      "message": "LINEPROTO-5-UPDOWN: Line protocol on Interface GigabitEthernet0/1, changed state to down",
+      "facility": "LINEPROTO",
+      "timestamp": "2026-10-31T11:59:30Z"
+    },
+    {
+      "observation_id": "OBS-000009",
+      "incident_id": "INC-2026-001",
+      "observation_type": "config",
+      "source": "git/network-configs",
+      "entity_id": "SW_CAMPUS_5",
+      "config_key": "interface.Gi0/1.qos_policy",
+      "config_value": "SHAPED_EGRESS_500M",
+      "previous_value": "UNRESTRICTED",
+      "timestamp": "2026-10-31T11:45:00Z"
+    }
+  ]
+}
