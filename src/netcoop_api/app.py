@@ -52,7 +52,7 @@ def create_app() -> FastAPI:
 
     # Mount compiled web frontend if available
     from pathlib import Path
-    web_dist = Path(__file__).resolve().parents[3] / "web" / "dist"
+    web_dist = Path(__file__).resolve().parents[2] / "web" / "dist"
     if web_dist.is_dir():
         from fastapi.staticfiles import StaticFiles
         app.mount("/ui", StaticFiles(directory=str(web_dist), html=True), name="ui")

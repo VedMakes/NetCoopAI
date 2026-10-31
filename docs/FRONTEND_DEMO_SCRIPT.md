@@ -232,3 +232,4 @@ uv run netcoop diagnose fixtures/scenarios/link_congestion --explain
 # Run full automated test suite (229 tests)
 uv run pytest -q
 ```
+

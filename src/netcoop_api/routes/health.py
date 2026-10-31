@@ -37,9 +37,10 @@ def get_system_health() -> dict[str, Any]:
     # 2. Vocabulary
     try:
         vocab = load_vocabulary()
+        count = len(vocab.get("metrics", vocab)) if isinstance(vocab, dict) else len(vocab)
         components["vocabulary"] = {
             "status": "OK",
-            "details": f"{len(vocab.metrics)} canonical metrics loaded",
+            "details": f"{count} canonical metrics loaded",
         }
     except Exception as exc:
         components["vocabulary"] = {"status": "ERROR", "details": str(exc)}
