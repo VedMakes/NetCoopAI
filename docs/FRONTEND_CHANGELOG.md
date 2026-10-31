@@ -53,8 +53,8 @@ New entries are appended at the top.
   - `uv run netcoop scenarios`: PASS.
   - `uv run netcoop api --help`: PASS.
 - **Known issues:** None.
-- **Ending commit:** PENDING_COMMIT (will be updated upon commit)
-- **Push verification:** PENDING_PUSH
+- **Ending commit:** `0de1690`
+- **Push verification:** Pushed and verified at `origin/feature/netcoop-dashboard` (commit `0de1690`).
 - **Next phase:** PHASE 5 — Incident Explanation Assistant (Option A: multi-turn contextual explanation drawer, preset questions, offline fallback).
 
 ---
