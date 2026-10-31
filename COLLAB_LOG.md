@@ -1246,7 +1246,7 @@ All Phase 7 exit criteria are completely satisfied:
 - Assigned reviewer: Friend B
 - Branch: `hackathon/team-integration`
 - Base commit SHA: `0496c04`
-- Result commit SHA: `9c3d9b2`
+- Result commit SHA: `387a9c5`
 - Status: `AWAITING_REVIEW`
 
 ### Scope completed
@@ -1302,12 +1302,14 @@ All Phase 7 exit criteria are completely satisfied:
 
 | Command | Result | Notes |
 |---|---|---|
-| `.venv/bin/pytest -v` | PASS | 149 of 149 unit tests passed in 6.36s |
+| `.venv/bin/pytest -v` | PASS | 149 of 149 unit tests passed in 5.82s |
 | `.venv/bin/ruff check .` | PASS | Clean, 0 errors |
-| `.venv/bin/netcoop doctor` | PASS | All 7 components OK (including OpenRouter offline/online status check) |
+| `.venv/bin/netcoop doctor` | PASS | All 7 components OK (OpenRouter nvidia/nemotron-3.5-lightning:free configured) |
 | `.venv/bin/netcoop demo` | PASS | Full 5-scenario demo runs offline passing all gate checks |
 | `.venv/bin/netcoop diagnose fixtures/scenarios/dhcp_failure` | PASS | Diagnosed DHCP_FAILURE on SRV_DHCP_01 |
 | `.venv/bin/netcoop diagnose fixtures/scenarios/healthy` | PASS | Clean ABSTAIN certified (confidence 0.0) |
+| `.venv/bin/netcoop diagnose fixtures/scenarios/link_congestion --llm on` | PASS | Live OpenRouter free model call, HTTP 200, Gate Certified (PASS_WITH_LIMITATIONS) |
+| `.venv/bin/netcoop diagnose fixtures/scenarios/healthy --llm on` | PASS | Live LLM run, zero tokens wasted, Gate Certified (ABSTAIN) |
 
 ### Reviewer checklist
 
