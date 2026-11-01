@@ -71,20 +71,20 @@ The assistant can explain published diagnoses, answer questions using the sessio
 
 Chat requires an LLM provider. If a request fails, the application reports the failure; it does not present a deterministic answer as if it came from the model. The symptom field is optional and runs a comparison after diagnosis. It cannot steer the diagnostic decision.
 
-## Optional OpenRouter configuration
+## Efficient model configuration
 
 Set the key in the environment before starting the backend:
 
 ```bash
 export OPENROUTER_API_KEY="your-key"
-# Optional:
+# Configuration overrides:
 export OPENROUTER_MODEL="provider/model"
 export OPENROUTER_BASE_URL="https://openrouter.ai/api/v1"
 
 uv run netcoop api --host 127.0.0.1 --port 8000
 ```
 
-Defaults are provided for the optional model and base URL. Keep keys out of source control. Model requests send the context needed for that feature to the configured provider; use only data permitted by your organization's policy.
+Defaults are provided for the model and base URL. Keep keys out of source control. Model requests send the context needed for that feature to the configured provider; use only data permitted by your organization's policy.
 
 ## Troubleshooting
 

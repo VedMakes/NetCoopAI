@@ -65,7 +65,7 @@ Pay particular attention to:
 
 An absent path in a partial or unknown map is not proof of a network partition. Only a map explicitly marked complete can support that interpretation.
 
-## Add an optional caller symptom
+## Add a caller symptom comparison
 
 The symptom comparison runs after the diagnosis is decided. It cannot steer the towers or change the gate result. The flag also opens session chat after the run:
 
@@ -74,15 +74,15 @@ uv run netcoop triage ./office-capture \
   --symptom-chat "Wi-Fi drops in the second-floor meeting rooms"
 ```
 
-This optional feature requires a configured LLM provider. It compares the caller's wording with the diagnosis and labels the relationship as aligned, mismatched, or unclear. Treat caller wording as context, not telemetry.
+This feature requires a configured LLM provider. It compares the caller's wording with the diagnosis and labels the relationship as aligned, mismatched, or unclear. Treat caller wording as context, not telemetry.
 
-## Optional LLM diagnosis
+## Efficient LLM assistance
 
-Deterministic diagnosis works offline. To enable the optional model-assisted recommendation path, configure OpenRouter:
+Deterministic diagnosis works offline. To enable the efficient model-assisted recommendation path, configure OpenRouter:
 
 ```bash
 export OPENROUTER_API_KEY="your-key"
-# Optional overrides:
+# Configuration overrides:
 export OPENROUTER_MODEL="provider/model"
 export OPENROUTER_BASE_URL="https://openrouter.ai/api/v1"
 
