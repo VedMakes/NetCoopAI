@@ -1,0 +1,102 @@
+version: "1.0"
+
+performance:
+  # Utilization thresholds
+  high_utilization_pct: 85.0
+  critical_utilization_pct: 92.0
+
+  # Queue drops thresholds
+  queue_drops_warning: 10.0
+  queue_drops_critical: 100.0
+
+  # Packet loss thresholds
+  packet_loss_warning_pct: 1.0
+  packet_loss_critical_pct: 2.5
+
+  # Latency anomaly detection
+  latency_ms_warning: 100.0
+  latency_ms_critical: 200.0
+  robust_z_threshold: 3.0
+
+  # Wireless (Wi-Fi) thresholds
+  rssi_warning_dbm: -75.0
+  rssi_critical_dbm: -82.0
+  snr_warning_db: 20.0
+  snr_critical_db: 12.0
+  throughput_warning_mbps: 30.0
+
+infrastructure:
+  # CPU utilization thresholds
+  cpu_warning_pct: 75.0
+  cpu_critical_pct: 90.0
+
+  # Memory utilization thresholds
+  memory_warning_pct: 80.0
+  memory_critical_pct: 90.0
+
+  # Interface error thresholds
+  interface_errors_warning: 10.0
+  interface_errors_critical: 50.0
+
+  # Link flap thresholds
+  link_flaps_threshold: 1
+
+  # Log analysis patterns
+  error_log_levels:
+    - "EMERGENCY"
+    - "ALERT"
+    - "CRITICAL"
+    - "ERROR"
+    - "WARNING"
+  error_keywords:
+    - "down"
+    - "flap"
+    - "crc"
+    - "error"
+    - "overload"
+    - "fail"
+    - "reset"
+    - "drop"
+
+connectivity:
+  # Deployment-specific topology anchors; network profiles may replace this list.
+  topology_anchors:
+    - "GW_EDGE_01"
+    - "SW_CORE_01"
+  logical_relationships:
+    - "dns"
+    - "dhcp"
+    - "default_gateway"
+    - "uplink"
+    - "wireless_access"
+  topology_completeness: complete
+  reachability_hop_limit: 15
+  isolated_subgraph_min_nodes: 1
+  path_failure_loss_threshold_pct: 100.0
+
+services:
+  dns_latency_warning_ms: 150.0
+  dns_latency_critical_ms: 500.0
+  dns_error_keywords:
+    - "SERVFAIL"
+    - "NXDOMAIN"
+    - "REFUSED"
+    - "TIMEOUT"
+    - "dns_failure"
+  dhcp_error_keywords:
+    - "exhausted"
+    - "nak"
+    - "pool_full"
+    - "dhcp_failure"
+    - "dhcp"
+  config_sensitive_keys:
+    - "mtu"
+    - "vlan"
+    - "speed"
+    - "duplex"
+    - "route"
+    - "gateway"
+    - "acl"
+    - "dns"
+
+

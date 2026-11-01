@@ -1,0 +1,20 @@
+{
+  "scenario_id": "SCEN-INTERFACE_FAULT-01",
+  "incident_id": "INC-SYNTH-INTE-001",
+  "injected_fault_class": "interface_fault",
+  "target_entity": "SW_DIST_DEPT:Gi0/1",
+  "intended_affected_entities": [
+    "SW_DIST_DEPT:Gi0/1",
+    "SW_ACCESS_LAB"
+  ],
+  "fault_start_step": 4,
+  "fault_start_time": "2026-10-31T12:02:00+00:00",
+  "fault_duration_steps": 8,
+  "severity": "high",
+  "simulator_metadata": {
+    "seed": 42,
+    "num_steps": 15,
+    "sampling_interval_seconds": 30,
+    "start_time": "2026-10-31T12:00:00+00:00"
+  }
+}

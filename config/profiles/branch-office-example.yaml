@@ -1,0 +1,59 @@
+profile_id: branch-office-example
+version: "1.0"
+display_name: Example branch office network
+
+source_fields:
+  source_entity: src_node
+  target_entity: dst_node
+  relationship_type: kind
+  link_id: id
+  capacity_mbps: capacity
+  interface_name: iface
+  consumer_entity: client
+  provider_entity: server
+
+entity_aliases:
+  edge-fw-a: BR-EDGE-01
+  core-sw-a: BR-CORE-01
+  dist-sw-west: BR-DIST-WEST
+  resolver-prod: BR-DNS-01
+  relay-prod: BR-DHCP-01
+
+metric_mappings:
+  cpu_pct:
+    canonical_name: cpu_utilization_pct
+    source_unit: percent
+  round_trip_time:
+    canonical_name: latency_ms
+    source_unit: seconds
+  if_in_errors:
+    canonical_name: interface_errors
+    source_unit: count
+  egress_queue_discards:
+    canonical_name: queue_drops
+    source_unit: count
+  tx_utilization:
+    canonical_name: link_utilization_pct
+    source_unit: percent
+
+entity_roles:
+  BR-DNS-01: [dns_resolver, service]
+  BR-DHCP-01: [dhcp_server, service]
+  BR-EDGE-01: [edge, anchor]
+  BR-CORE-01: [core, anchor]
+
+topology_anchors: [BR-EDGE-01, BR-CORE-01]
+
+relationship_aliases:
+  ethernet: connected_to
+  vlan_link: connected_to
+  wireless: connected_to
+
+logical_relationships: [dns, dhcp, default_gateway, uplink, vpn_dependency]
+topology_completeness: complete
+
+rule_overrides:
+  performance:
+    high_utilization_pct: 90.0
+  services:
+    dns_latency_warning_ms: 250.0

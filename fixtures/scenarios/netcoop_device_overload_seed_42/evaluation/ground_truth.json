@@ -1,0 +1,21 @@
+{
+  "scenario_id": "SCEN-DEVICE_OVERLOAD-01",
+  "incident_id": "INC-SYNTH-DEVI-001",
+  "injected_fault_class": "device_overload",
+  "target_entity": "SW_CORE_01",
+  "intended_affected_entities": [
+    "SW_CORE_01",
+    "SW_DIST_HOSTEL",
+    "SW_DIST_DEPT"
+  ],
+  "fault_start_step": 4,
+  "fault_start_time": "2026-10-31T12:02:00+00:00",
+  "fault_duration_steps": 8,
+  "severity": "critical",
+  "simulator_metadata": {
+    "seed": 42,
+    "num_steps": 15,
+    "sampling_interval_seconds": 30,
+    "start_time": "2026-10-31T12:00:00+00:00"
+  }
+}

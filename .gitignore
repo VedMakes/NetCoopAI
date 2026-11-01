@@ -50,6 +50,7 @@ htmlcov/
 # SQLite temporary/runtime files
 *.db-shm
 *.db-wal
+data/netcoop/
 
 # Editor and OS
 .DS_Store
@@ -59,4 +60,9 @@ Thumbs.db
 *.swp
 *.swo
 *~
+
+# Frontend Web Build
+web/node_modules/
+web/dist/
+web/.vite/
 

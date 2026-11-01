@@ -25,7 +25,7 @@ from netcoop.models.observations import (
     MetricObservation,
     TopologyObservation,
 )
-from netcoop.models.reports import FinalReport, TowerReport
+from netcoop.models.reports import FinalReport, SupervisorProposal, TowerReport
 
 SCHEMA_VERSION = 1
 
@@ -112,6 +112,17 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS idx_events_corr ON events(correlationid);
 CREATE INDEX IF NOT EXISTS idx_events_outbox ON events(outbox_dispatched);
 
+CREATE TABLE IF NOT EXISTS event_deliveries (
+    event_id TEXT NOT NULL,
+    consumer_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 1,
+    error TEXT,
+    delivered_at TEXT NOT NULL,
+    PRIMARY KEY(event_id, consumer_id)
+);
+CREATE INDEX IF NOT EXISTS idx_deliveries_consumer ON event_deliveries(consumer_id);
+
 CREATE TABLE IF NOT EXISTS peer_queries (
     query_id TEXT PRIMARY KEY,
     incident_id TEXT NOT NULL,
@@ -159,6 +170,25 @@ CREATE TABLE IF NOT EXISTS final_reports (
     confidence REAL NOT NULL,
     generated_at TEXT NOT NULL,
     report_json TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS supervisor_proposals (
+    proposal_id TEXT PRIMARY KEY,
+    incident_id TEXT NOT NULL,
+    decision TEXT NOT NULL,
+    suspected_root_cause TEXT,
+    confidence_category TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    proposal_json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_proposals_incident ON supervisor_proposals(incident_id);
+
+CREATE TABLE IF NOT EXISTS gate_results (
+    incident_id TEXT PRIMARY KEY,
+    outcome TEXT NOT NULL,
+    passed INTEGER NOT NULL,
+    evaluated_at TEXT NOT NULL,
+    result_json TEXT NOT NULL
 );
 """
 
@@ -406,7 +436,7 @@ class SQLiteRepository:
         with self.transaction() as conn:
             conn.execute(
                 """
-                INSERT INTO events
+                INSERT OR IGNORE INTO events
                 (id, specversion, source, type, subject, time, correlationid,
                  causationid, dataschema, data_json, outbox_dispatched, created_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -490,6 +520,63 @@ class SQLiteRepository:
     def mark_event_dispatched(self, event_id: str) -> None:
         with self.transaction() as conn:
             conn.execute("UPDATE events SET outbox_dispatched = 1 WHERE id = ?", (event_id,))
+
+    def record_event_delivery(
+        self,
+        event_id: str,
+        consumer_id: str,
+        status: str = "completed",
+        error: str | None = None,
+    ) -> None:
+        now = _iso_now()
+        with self.transaction() as conn:
+            conn.execute(
+                """
+                INSERT INTO event_deliveries (event_id, consumer_id, status, attempts, error, delivered_at)
+                VALUES (?, ?, ?, 1, ?, ?)
+                ON CONFLICT(event_id, consumer_id) DO UPDATE SET
+                    status = excluded.status,
+                    attempts = attempts + 1,
+                    error = excluded.error,
+                    delivered_at = excluded.delivered_at
+                """,
+                (event_id, consumer_id, status, error, now),
+            )
+
+    def is_event_delivered(self, event_id: str, consumer_id: str) -> bool:
+        with self.transaction() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT 1 FROM event_deliveries WHERE event_id = ? AND consumer_id = ? AND status = 'completed'",
+                (event_id, consumer_id),
+            )
+            return cur.fetchone() is not None
+
+    def get_event_deliveries(self, event_id: str | None = None) -> list[dict[str, Any]]:
+        with self.transaction() as conn:
+            cur = conn.cursor()
+            if event_id:
+                cur.execute(
+                    "SELECT event_id, consumer_id, status, attempts, error, delivered_at FROM event_deliveries WHERE event_id = ?",
+                    (event_id,),
+                )
+            else:
+                cur.execute(
+                    "SELECT event_id, consumer_id, status, attempts, error, delivered_at FROM event_deliveries"
+                )
+            rows = cur.fetchall()
+
+        return [
+            {
+                "event_id": r["event_id"],
+                "consumer_id": r["consumer_id"],
+                "status": r["status"],
+                "attempts": r["attempts"],
+                "error": r["error"],
+                "delivered_at": r["delivered_at"],
+            }
+            for r in rows
+        ]
 
     # ---------------- Peer Queries ----------------
     def insert_peer_query(self, query: PeerQuery) -> None:
@@ -591,6 +678,24 @@ class SQLiteRepository:
             )
         return updated_task
 
+    def update_task(self, task: InvestigationTask) -> None:
+        data = task.model_dump(mode="json")
+        with self.transaction() as conn:
+            conn.execute(
+                """
+                UPDATE tasks
+                SET status = ?, counter_proposal_count = ?, updated_at = ?, task_json = ?
+                WHERE task_id = ?
+                """,
+                (
+                    task.status.value,
+                    task.counter_proposal_count,
+                    task.updated_at.isoformat(),
+                    json.dumps(data),
+                    task.task_id,
+                ),
+            )
+
     def get_task_by_id(self, task_id: str) -> InvestigationTask | None:
         with self.transaction() as conn:
             cur = conn.cursor()
@@ -674,3 +779,83 @@ class SQLiteRepository:
             if row:
                 return FinalReport.model_validate(json.loads(row["report_json"]))
         return None
+
+    # ---------------- Supervisor Proposals & Gate Results ----------------
+    def insert_supervisor_proposal(self, proposal: SupervisorProposal) -> None:
+        data = proposal.model_dump(mode="json")
+        with self.transaction() as conn:
+            conn.execute(
+                """
+                INSERT INTO supervisor_proposals
+                (proposal_id, incident_id, decision, suspected_root_cause, confidence_category, created_at, proposal_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(proposal_id) DO UPDATE SET
+                    decision=excluded.decision,
+                    suspected_root_cause=excluded.suspected_root_cause,
+                    confidence_category=excluded.confidence_category,
+                    created_at=excluded.created_at,
+                    proposal_json=excluded.proposal_json
+                """,
+                (
+                    proposal.proposal_id,
+                    proposal.incident_id,
+                    proposal.decision.value,
+                    proposal.suspected_root_cause,
+                    proposal.confidence_category.value,
+                    proposal.created_at.isoformat(),
+                    json.dumps(data),
+                ),
+            )
+
+    def get_supervisor_proposals(self, incident_id: str) -> list[SupervisorProposal]:
+        proposals: list[SupervisorProposal] = []
+        with self.transaction() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT proposal_json FROM supervisor_proposals WHERE incident_id = ? ORDER BY created_at ASC",
+                (incident_id,),
+            )
+            for row in cur.fetchall():
+                proposals.append(SupervisorProposal.model_validate(json.loads(row["proposal_json"])))
+        return proposals
+
+    def insert_gate_result(self, incident_id: str, result: Any) -> None:
+        from netcoop.supervisor.models import GateResult
+
+        res = result if isinstance(result, GateResult) else GateResult.model_validate(result)
+        data = res.model_dump(mode="json")
+        with self.transaction() as conn:
+            conn.execute(
+                """
+                INSERT INTO gate_results
+                (incident_id, outcome, passed, evaluated_at, result_json)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(incident_id) DO UPDATE SET
+                    outcome=excluded.outcome,
+                    passed=excluded.passed,
+                    evaluated_at=excluded.evaluated_at,
+                    result_json=excluded.result_json
+                """,
+                (
+                    incident_id,
+                    res.outcome.value,
+                    1 if res.passed else 0,
+                    res.evaluated_at.isoformat(),
+                    json.dumps(data),
+                ),
+            )
+
+    def get_gate_result(self, incident_id: str) -> Any | None:
+        from netcoop.supervisor.models import GateResult
+
+        with self.transaction() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT result_json FROM gate_results WHERE incident_id = ?",
+                (incident_id,),
+            )
+            row = cur.fetchone()
+            if row:
+                return GateResult.model_validate(json.loads(row["result_json"]))
+        return None
+

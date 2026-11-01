@@ -1,7 +1,7 @@
 """Report and proposal models for tower outputs, supervisor proposals, and final diagnostic deliverables."""
 
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -49,9 +49,11 @@ class SupervisorProposal(BaseModel):
     supporting_finding_refs: list[str] = Field(default_factory=list)
     confidence_category: ConfidenceCategory
     alternative_causes: list[str] = Field(default_factory=list)
+    concurrent_causes: list[str] = Field(default_factory=list)
     recommended_actions: list[str] = Field(default_factory=list)
     abstain_reason: str | None = None
     requested_tasks: list[dict[str, Any]] = Field(default_factory=list)
+    operator_questions: list[str] = Field(default_factory=list)
     created_at: datetime
 
     @field_validator("created_at")
@@ -81,6 +83,62 @@ class SupportingEvidenceItem(BaseModel):
     metric: str
     value: Any
     interpretation: str
+    entity_id: str | None = None
+    unit: str | None = None
+    observed_at: datetime | None = None
+    source: str | None = None
+
+
+class PredictedImpact(BaseModel):
+    """Topology-based candidate impact, explicitly distinct from observed impact."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    entity_id: str
+    relation: str
+    inferred_from: str
+    path: list[str] = Field(default_factory=list)
+    hops: int = 1
+    topology_evidence_refs: list[str] = Field(default_factory=list)
+    certainty: Literal["candidate"] = "candidate"
+
+
+class PathTraceItem(BaseModel):
+    """Supplemental topology route trace; reachability is not a causal claim."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_entity: str
+    target_entity: str
+    reachable: bool | None
+    path: list[str] = Field(default_factory=list)
+    evidence_refs: list[str] = Field(default_factory=list)
+    warning: str | None = None
+
+
+class PathTriage(BaseModel):
+    """Post-diagnosis path context, separate from the root-cause decision."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["traced", "partial", "unavailable"]
+    paths: list[PathTraceItem] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+
+
+class SymptomReasoning(BaseModel):
+    """Optional, rule-based comparison of a caller's words with a diagnosis."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    reported_symptom: str
+    status: Literal["aligned", "mismatch", "unclear"]
+    recognized_domains: list[str] = Field(default_factory=list)
+    diagnosed_fault_codes: list[str] = Field(default_factory=list)
+    matched_fault_codes: list[str] = Field(default_factory=list)
+    explanation: str
+    agent_mode: Literal["deterministic", "llm", "deterministic_fallback", "llm_unavailable"] = "deterministic"
+    warnings: list[str] = Field(default_factory=list)
 
 
 class FinalReport(BaseModel):
@@ -93,12 +151,25 @@ class FinalReport(BaseModel):
     suspected_root_cause: str
     confidence: float = Field(..., ge=0.0, le=1.0)
     affected_devices: list[str] = Field(default_factory=list)
+    directly_affected_entities: list[str] = Field(default_factory=list)
+    observed_symptom_entities: list[str] = Field(default_factory=list)
     supporting_evidence: list[SupportingEvidenceItem] = Field(default_factory=list)
     alternative_causes: list[str] = Field(default_factory=list)
     recommended_actions: list[str] = Field(default_factory=list)
     evidence_sources: list[str] = Field(default_factory=list)
     limitations: list[str] = Field(default_factory=list)
     confidence_category: ConfidenceCategory = ConfidenceCategory.MODERATE
+    concurrent_causes: list[str] = Field(default_factory=list)
+    inferred_affected_entities: list[str] = Field(default_factory=list)
+    predicted_impacts: list[PredictedImpact] = Field(default_factory=list)
+    operator_questions: list[str] = Field(default_factory=list)
+    data_quality_warnings: list[str] = Field(default_factory=list)
+    orchestration_warnings: list[str] = Field(default_factory=list)
+    peer_interactions: list[dict[str, Any]] = Field(default_factory=list)
+    path_triage: PathTriage | None = None
+    symptom_reasoning: SymptomReasoning | None = None
+    site_id: str | None = None
+    network_profile: dict[str, str] | None = None
     generated_at: datetime
 
     @field_validator("generated_at")

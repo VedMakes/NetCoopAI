@@ -1,0 +1,17 @@
+{
+  "scenario_id": "SCEN-HEALTHY-01",
+  "incident_id": "INC-SYNTH-HEAL-001",
+  "injected_fault_class": "healthy",
+  "target_entity": "none",
+  "intended_affected_entities": [],
+  "fault_start_step": 0,
+  "fault_start_time": "2026-10-31T12:00:00+00:00",
+  "fault_duration_steps": 0,
+  "severity": "none",
+  "simulator_metadata": {
+    "seed": 7,
+    "num_steps": 15,
+    "sampling_interval_seconds": 30,
+    "start_time": "2026-10-31T12:00:00+00:00"
+  }
+}

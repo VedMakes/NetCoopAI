@@ -77,6 +77,10 @@ class CapabilityRegistry:
 
         return cls(profiles)
 
+    @classmethod
+    def get_profile(cls, tower_id: TowerId) -> TowerProfile | None:
+        return cls.load()._profiles.get(tower_id)
+
     def get_capability(self, capability_id: str) -> TowerCapability | None:
         pair = self._capabilities.get(capability_id)
         return pair[1] if pair else None
