@@ -11,6 +11,7 @@ export default {
         noc: {
           bg: '#0B0D14',
           panel: '#121624',
+        card: '#0E1422',
           subpanel: '#1A2035',
           border: '#242C47',
           hover: '#2D375B',
@@ -21,10 +22,15 @@ export default {
           cyan: '#38BDF8',
           amethyst: '#C7A7EF',
           green: '#10B981',
+        emerald: '#10B981',
           yellow: '#F59E0B',
+        amber: '#F59E0B',
           red: '#F43F5E',
           purple: '#A855F7',
         }
+      },
+      opacity: {
+        15: '0.15',
       },
       fontFamily: {
         mono: ['JetBrains Mono', 'Fira Code', 'Menlo', 'monospace'],

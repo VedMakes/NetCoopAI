@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   FinalReport,
   RunStatusResponse,
@@ -55,85 +55,118 @@ export const IncidentIntelligence: React.FC<IncidentIntelligenceProps> = ({
 
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
+  const [artifactWarnings, setArtifactWarnings] = useState<string[]>([]);
   const [activeSubTab, setActiveSubTab] = useState<
     'overview' | 'towers' | 'evidence' | 'fabric' | 'evaluation'
   >('overview');
+  const artifactRequestId = useRef(0);
 
   // Load all artifacts for active run
-  const loadArtifacts = async (runId: string) => {
+  const loadArtifacts = async (runId: string, runStatus: RunStatusResponse['status']) => {
+    const requestId = ++artifactRequestId.current;
+    const isCurrentRequest = () => artifactRequestId.current === requestId;
+    const warnings: string[] = [];
+    const recordWarning = (label: string, err: unknown) => {
+      const detail = err instanceof Error ? err.message : 'request failed';
+      warnings.push(`${label}: ${detail}`);
+    };
     setLoading(true);
     setError(null);
+    setArtifactWarnings([]);
     try {
-      // 1. Report
-      let currentReport = report;
-      if (!currentReport) {
-        try {
-          currentReport = await getRunReport(runId);
-          setReport(currentReport);
-        } catch {
-          // Report might be pending
-        }
+      // Always fetch by run ID; never carry report state over from a previous run.
+      try {
+        const currentReport = await getRunReport(runId);
+        if (isCurrentRequest()) setReport(currentReport);
+      } catch (err) {
+        // A report is not available until the run has completed.
+        if (runStatus === 'completed') recordWarning('Final report', err);
       }
+      if (!isCurrentRequest()) return;
 
-      // 2. Telemetry
       try {
         const telem = await getRunTelemetry(runId);
-        setTelemetry(telem);
+        if (isCurrentRequest()) setTelemetry(telem);
       } catch (err: any) {
         console.warn('Could not load telemetry:', err);
+        if (runStatus === 'completed') recordWarning('Telemetry', err);
       }
+      if (!isCurrentRequest()) return;
 
-      // 3. Findings
       try {
         const findings = await getRunFindings(runId);
-        setTowers(findings);
+        if (isCurrentRequest()) setTowers(findings);
       } catch (err: any) {
         console.warn('Could not load findings:', err);
+        if (runStatus === 'completed') recordWarning('Tower findings', err);
       }
+      if (!isCurrentRequest()) return;
 
-      // 4. Events
       try {
         const evList = await getRunEvents(runId);
-        setEvents(evList);
+        if (isCurrentRequest()) setEvents(evList);
       } catch (err: any) {
         console.warn('Could not load events:', err);
+        if (runStatus === 'completed') recordWarning('Execution events', err);
       }
+      if (!isCurrentRequest()) return;
 
-      // 5. Tasks
       try {
         const taskList = await getRunTasks(runId);
-        setTasks(taskList);
+        if (isCurrentRequest()) setTasks(taskList);
       } catch (err: any) {
         console.warn('Could not load tasks:', err);
+        if (runStatus === 'completed') recordWarning('Diagnostic tasks', err);
       }
+      if (!isCurrentRequest()) return;
 
-      // 6. Gate
       try {
         const gateData = await getRunGate(runId);
-        setGate(gateData);
+        if (isCurrentRequest()) setGate(gateData);
       } catch (err: any) {
         console.warn('Could not load gate result:', err);
+        if (runStatus === 'completed') recordWarning('Evidence gate result', err);
       }
+      if (!isCurrentRequest()) return;
 
-      // 7. Evaluation against hidden ground truth
       try {
         const evalData = await getRunEvaluation(runId);
-        setEvaluation(evalData);
+        if (isCurrentRequest()) setEvaluation(evalData);
       } catch (err: any) {
         console.warn('Evaluation not available (e.g. non-scenario run):', err);
       }
+      if (isCurrentRequest()) setArtifactWarnings(warnings);
     } catch (err: any) {
-      setError(err.message || 'Failed to fetch incident artifacts');
+      if (isCurrentRequest()) setError(err.message || 'Failed to fetch incident artifacts');
     } finally {
-      setLoading(false);
+      if (isCurrentRequest()) setLoading(false);
     }
   };
 
   useEffect(() => {
+    artifactRequestId.current += 1;
+    setReport(initialReport);
+    setTelemetry(null);
+    setTowers([]);
+    setEvents([]);
+    setTasks([]);
+    setGate(null);
+    setEvaluation(null);
+    setError(null);
+    setArtifactWarnings([]);
     if (activeRun?.run_id) {
-      loadArtifacts(activeRun.run_id);
+      loadArtifacts(activeRun.run_id, activeRun.status);
+    } else {
+      setLoading(false);
     }
-  }, [activeRun?.run_id]);
+    return () => {
+      artifactRequestId.current += 1;
+    };
+  }, [activeRun?.run_id, activeRun?.status]);
+
+  useEffect(() => {
+    setReport(initialReport);
+  }, [initialReport]);
 
   if (!activeRun) {
     return (
@@ -159,6 +192,8 @@ export const IncidentIntelligence: React.FC<IncidentIntelligenceProps> = ({
               className={`w-2.5 h-2.5 rounded-full ${
                 activeRun.status === 'completed'
                   ? 'bg-noc-emerald shadow-sm shadow-noc-emerald'
+                  : activeRun.status === 'failed'
+                  ? 'bg-noc-red'
                   : activeRun.status === 'running'
                   ? 'bg-noc-cyan animate-pulse'
                   : 'bg-noc-amber'
@@ -171,6 +206,8 @@ export const IncidentIntelligence: React.FC<IncidentIntelligenceProps> = ({
               className={`text-[10px] font-mono uppercase px-2 py-0.5 rounded border ${
                 activeRun.status === 'completed'
                   ? 'bg-noc-emerald/15 text-noc-emerald border-noc-emerald/30'
+                  : activeRun.status === 'failed'
+                  ? 'bg-noc-red/15 text-noc-red border-noc-red/30'
                   : 'bg-noc-cyan/15 text-noc-cyan border-noc-cyan/30'
               }`}
             >
@@ -193,7 +230,7 @@ export const IncidentIntelligence: React.FC<IncidentIntelligenceProps> = ({
         {/* Action Controls */}
         <div className="flex items-center gap-2 shrink-0">
           <button
-            onClick={() => loadArtifacts(activeRun.run_id)}
+            onClick={() => loadArtifacts(activeRun.run_id, activeRun.status)}
             disabled={loading}
             className="flex items-center gap-1.5 bg-noc-bg hover:bg-noc-card border border-noc-border text-xs px-3 py-1.5 rounded-lg text-noc-muted hover:text-noc-text transition-colors"
           >
@@ -203,10 +240,25 @@ export const IncidentIntelligence: React.FC<IncidentIntelligenceProps> = ({
         </div>
       </div>
 
+      {activeRun.status === 'failed' && (
+        <div role="alert" className="p-3 bg-red-950/20 border border-red-500/40 rounded-xl text-xs text-red-300">
+          {activeRun.error || 'This investigation failed before publishing a report.'}
+        </div>
+      )}
+
       {error && (
         <div className="p-3 bg-red-950/20 border border-red-500/40 rounded-xl text-xs text-red-400 flex items-center gap-2">
           <AlertCircle className="w-4 h-4 shrink-0" />
           <span>{error}</span>
+        </div>
+      )}
+
+      {artifactWarnings.length > 0 && (
+        <div role="status" className="rounded-xl border border-noc-amber/40 bg-noc-amber/10 p-3 text-xs text-noc-amber">
+          <p className="font-semibold">Some investigation details could not be loaded:</p>
+          <ul className="mt-1 list-disc list-inside space-y-0.5">
+            {artifactWarnings.map((warning) => <li key={warning}>{warning}</li>)}
+          </ul>
         </div>
       )}
 

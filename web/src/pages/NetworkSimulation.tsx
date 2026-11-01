@@ -1,16 +1,16 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useRef } from 'react';
 import { Play, RotateCcw, Activity, Cpu, Server, Radio } from 'lucide-react';
 import {
   ExecutionEvent,
   FinalReport,
   RunStatusResponse,
   ScenarioSummary,
-  TelemetryObservation,
   TopologyGraph,
   TopologyNode,
 } from '../types';
 import {
   createRun,
+  createUploadedRun,
   getRunEvents,
   getRunReport,
   getRunStatus,
@@ -24,23 +24,35 @@ import { PlaybackControls } from '../components/PlaybackControls';
 
 interface NetworkSimulationProps {
   onRunCompleted: (runId: string, incidentId: string, report: FinalReport) => void;
+  onRunStarted: (openChatAfterRun: boolean) => void;
+  onRunCleared: () => void;
+  onRunCreated: (run: RunStatusResponse) => void;
+  sessionId: string | null;
+  isLoadingSelection: boolean;
+  uploadFocusRequestId: number;
   activeRun: RunStatusResponse | null;
   setActiveRun: (run: RunStatusResponse | null) => void;
 }
 
 export const NetworkSimulation: React.FC<NetworkSimulationProps> = ({
   onRunCompleted,
+  onRunStarted,
+  onRunCleared,
+  onRunCreated,
+  sessionId,
+  isLoadingSelection,
+  uploadFocusRequestId,
   activeRun,
   setActiveRun,
 }) => {
   const [scenarios, setScenarios] = useState<ScenarioSummary[]>([]);
   const [selectedScenarioId, setSelectedScenarioId] = useState<string>('link_congestion');
   const [llmMode, setLlmMode] = useState<'off' | 'auto' | 'on'>('off');
+  const [callerSymptom, setCallerSymptom] = useState('');
   const [topology, setTopology] = useState<TopologyGraph | null>(null);
   const [selectedNode, setSelectedNode] = useState<TopologyNode | null>(null);
 
   // Playback state
-  const [observations, setObservations] = useState<TelemetryObservation[]>([]);
   const [timeSteps, setTimeSteps] = useState<string[]>([]);
   const [currentStep, setCurrentStep] = useState<number>(0);
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
@@ -50,6 +62,60 @@ export const NetworkSimulation: React.FC<NetworkSimulationProps> = ({
   const [isLaunching, setIsLaunching] = useState<boolean>(false);
   const [events, setEvents] = useState<ExecutionEvent[]>([]);
   const [report, setReport] = useState<FinalReport | null>(null);
+  const [telemetryFile, setTelemetryFile] = useState<File | null>(null);
+  const [topologyFile, setTopologyFile] = useState<File | null>(null);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const [runError, setRunError] = useState<string | null>(null);
+  const activeRunIdRef = useRef<string | null>(activeRun?.run_id ?? null);
+  const sessionIdRef = useRef<string | null>(sessionId);
+  const topologyRequestIdRef = useRef(0);
+  const uploadSectionRef = useRef<HTMLElement>(null);
+  const runInProgress = isLaunching || isLoadingSelection || activeRun?.status === 'queued' || activeRun?.status === 'running';
+
+  useEffect(() => {
+    if (uploadFocusRequestId > 0) {
+      uploadSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      uploadSectionRef.current?.focus({ preventScroll: true });
+    }
+  }, [uploadFocusRequestId]);
+
+  const loadScenarioTopology = (scenarioId: string) => {
+    const requestId = ++topologyRequestIdRef.current;
+    getScenarioTopology(scenarioId)
+      .then((graph) => {
+        if (topologyRequestIdRef.current === requestId) setTopology(graph);
+      })
+      .catch((err) => {
+        if (topologyRequestIdRef.current === requestId) {
+          console.error('Failed to load scenario topology:', err);
+        }
+      });
+  };
+
+  useLayoutEffect(() => {
+    activeRunIdRef.current = activeRun?.run_id ?? null;
+  }, [activeRun?.run_id]);
+
+  useLayoutEffect(() => {
+    sessionIdRef.current = sessionId;
+  }, [sessionId]);
+
+  useEffect(() => {
+    setReport(null);
+    setEvents([]);
+    setTimeSteps([]);
+    setCurrentStep(0);
+    setIsPlaying(false);
+    setSelectedNode(null);
+    if (activeRun?.scenario_id) {
+      loadScenarioTopology(activeRun.scenario_id);
+    } else if (activeRun) {
+      topologyRequestIdRef.current += 1;
+      setTopology(null);
+    } else if (selectedScenarioId) {
+      loadScenarioTopology(selectedScenarioId);
+    }
+  }, [activeRun?.run_id]);
 
   // 1. Load available scenarios on mount
   useEffect(() => {
@@ -65,44 +131,30 @@ export const NetworkSimulation: React.FC<NetworkSimulationProps> = ({
 
   // 2. Load topology whenever selected scenario changes (if not running a custom run)
   useEffect(() => {
-    if (selectedScenarioId) {
-      getScenarioTopology(selectedScenarioId)
-        .then(setTopology)
-        .catch(err => console.error('Failed to load scenario topology:', err));
+    if (!activeRun && selectedScenarioId) {
+      loadScenarioTopology(selectedScenarioId);
     }
-  }, [selectedScenarioId]);
+  }, [selectedScenarioId, activeRun?.run_id]);
 
   // 3. Polling / Event streaming when active run is running
   useEffect(() => {
     if (!activeRun || activeRun.status === 'completed' || activeRun.status === 'failed') return;
+    const runId = activeRun.run_id;
 
     const interval = setInterval(async () => {
       try {
-        const st = await getRunStatus(activeRun.run_id);
+        const st = await getRunStatus(runId);
+        if (activeRunIdRef.current !== runId) return;
         setActiveRun(st);
 
         // Fetch events
-        const evts = await getRunEvents(activeRun.run_id);
+        const evts = await getRunEvents(runId);
+        if (activeRunIdRef.current !== runId) return;
         setEvents(evts);
 
         if (st.status === 'completed') {
           clearInterval(interval);
-          // Fetch final artifacts
-          const rep = await getRunReport(activeRun.run_id);
-          setReport(rep);
-
-          const topo = await getRunTopology(activeRun.run_id);
-          setTopology(topo);
-
-          const telem = await getRunTelemetry(activeRun.run_id);
-          setObservations(telem.observations);
-
-          // Extract distinct timestamps
-          const distinctTimes = Array.from(new Set(telem.observations.map(o => o.timestamp))).sort();
-          setTimeSteps(distinctTimes);
-          setCurrentStep(distinctTimes.length);
-
-          onRunCompleted(activeRun.run_id, activeRun.incident_id, rep);
+          return;
         }
       } catch (err) {
         console.error('Error polling run:', err);
@@ -110,7 +162,45 @@ export const NetworkSimulation: React.FC<NetworkSimulationProps> = ({
     }, 1000);
 
     return () => clearInterval(interval);
-  }, [activeRun]);
+  }, [activeRun?.run_id, activeRun?.status]);
+
+  useEffect(() => {
+    if (!activeRun || activeRun.status !== 'completed') return;
+    const runId = activeRun.run_id;
+    const incidentId = activeRun.incident_id;
+    const topologyRequestId = ++topologyRequestIdRef.current;
+    let cancelled = false;
+    const loadCompletedArtifacts = async () => {
+      const [reportResult, topologyResult, telemetryResult] = await Promise.allSettled([
+          getRunReport(runId),
+          getRunTopology(runId),
+          getRunTelemetry(runId),
+      ]);
+      if (cancelled || activeRunIdRef.current !== runId) return;
+
+      if (reportResult.status === 'fulfilled') {
+        setReport(reportResult.value);
+        onRunCompleted(runId, incidentId, reportResult.value);
+      } else {
+        console.error('Could not load completed run report:', reportResult.reason);
+      }
+      if (topologyResult.status === 'fulfilled') {
+        if (topologyRequestIdRef.current === topologyRequestId) setTopology(topologyResult.value);
+      } else {
+        console.error('Could not load completed run topology:', topologyResult.reason);
+        if (activeRun.scenario_id) loadScenarioTopology(activeRun.scenario_id);
+      }
+      if (telemetryResult.status === 'fulfilled') {
+        const distinctTimes = Array.from(new Set(telemetryResult.value.observations.map((o) => o.timestamp))).sort();
+        setTimeSteps(distinctTimes);
+        setCurrentStep(distinctTimes.length);
+      } else {
+        console.error('Could not load completed run telemetry:', telemetryResult.reason);
+      }
+    };
+    void loadCompletedArtifacts();
+    return () => { cancelled = true; };
+  }, [activeRun?.run_id, activeRun?.status]);
 
   // 4. Playback animation timer
   useEffect(() => {
@@ -131,52 +221,105 @@ export const NetworkSimulation: React.FC<NetworkSimulationProps> = ({
   }, [isPlaying, timeSteps, playbackSpeed]);
 
   const handleLaunchRun = async () => {
-    if (!selectedScenarioId || isLaunching) return;
+    if (!selectedScenarioId || !sessionId || runInProgress) return;
+    const requestedSessionId = sessionId;
+    const requestedSymptom = callerSymptom.trim();
 
-    setIsLaunching(true);
-    setEvents([]);
-    setReport(null);
-    setCurrentStep(0);
-    setIsPlaying(false);
+    prepareNewRun(Boolean(requestedSymptom));
 
     try {
       const run = await createRun({
         scenario_id: selectedScenarioId,
+        session_id: requestedSessionId,
         llm: llmMode,
+        ...(requestedSymptom ? { symptom_chat: requestedSymptom } : {}),
       });
-      setActiveRun(run);
+      if (requestedSymptom) setCallerSymptom('');
+      onRunCreated(run);
+      if (sessionIdRef.current === requestedSessionId) {
+        activeRunIdRef.current = run.run_id;
+        setActiveRun(run);
+      }
     } catch (err: any) {
-      alert(`Failed to launch run: ${err.message || 'Unknown error'}`);
+      setRunError(`Failed to launch run: ${err.message || 'Unknown error'}`);
+    } finally {
+      setIsLaunching(false);
+    }
+  };
+
+  const prepareNewRun = (openChatAfterRun = false) => {
+    activeRunIdRef.current = null;
+    onRunStarted(openChatAfterRun);
+    setActiveRun(null);
+    setIsLaunching(true);
+    setEvents([]);
+    setReport(null);
+    setTimeSteps([]);
+    setCurrentStep(0);
+    setIsPlaying(false);
+    setSelectedNode(null);
+    setUploadError(null);
+    setRunError(null);
+  };
+
+  const handleUploadRun = async () => {
+    if (!telemetryFile || !sessionId || runInProgress) return;
+    const requestedSessionId = sessionId;
+    const requestedSymptom = callerSymptom.trim();
+    const telemetrySuffix = telemetryFile.name.split('.').pop()?.toLowerCase();
+    if (!['json', 'jsonl', 'csv', 'log'].includes(telemetrySuffix || '')) {
+      setUploadError('Choose a .json, .jsonl, .csv, or .log telemetry file.');
+      return;
+    }
+    if (telemetryFile.size > 20_000_000) {
+      setUploadError('Telemetry files must be 20 MB or smaller.');
+      return;
+    }
+    if (topologyFile && (!topologyFile.name.toLowerCase().endsWith('.json') || topologyFile.size > 5_000_000)) {
+      setUploadError('The optional topology must be a JSON file no larger than 5 MB.');
+      return;
+    }
+
+    prepareNewRun(Boolean(requestedSymptom));
+    try {
+      const request = {
+        telemetry_filename: telemetryFile.name,
+        telemetry_content: await telemetryFile.text(),
+        ...(topologyFile
+          ? { topology_filename: topologyFile.name, topology_content: await topologyFile.text() }
+          : {}),
+        session_id: requestedSessionId,
+        llm: llmMode,
+        ...(requestedSymptom ? { symptom_chat: requestedSymptom } : {}),
+      };
+      const run = await createUploadedRun(request);
+      if (requestedSymptom) setCallerSymptom('');
+      onRunCreated(run);
+      if (sessionIdRef.current === requestedSessionId) {
+        activeRunIdRef.current = run.run_id;
+        setActiveRun(run);
+      }
+    } catch (err: any) {
+      setUploadError(`Upload failed: ${err.message || 'Unknown error'}`);
     } finally {
       setIsLaunching(false);
     }
   };
 
   const handleReset = () => {
+    activeRunIdRef.current = null;
+    onRunCleared();
     setActiveRun(null);
     setReport(null);
     setEvents([]);
+    setTimeSteps([]);
     setCurrentStep(0);
     setIsPlaying(false);
-    if (selectedScenarioId) {
-      getScenarioTopology(selectedScenarioId).then(setTopology);
-    }
+    setSelectedNode(null);
+    setUploadError(null);
+    setRunError(null);
+    if (selectedScenarioId) loadScenarioTopology(selectedScenarioId);
   };
-
-  // Derive visible symptoms up to current playback step
-  const visibleObservations = observations.filter(o => {
-    if (currentStep === 0) return false;
-    const stepTime = timeSteps[currentStep - 1];
-    return stepTime && o.timestamp <= stepTime;
-  });
-
-  const activeSymptomEntities = Array.from(
-    new Set(
-      visibleObservations
-        .filter(o => o.observation_type === 'metric' && (o.value || 0) > 80) // simple threshold filter for playback
-        .map(o => o.entity_id)
-    )
-  );
 
   return (
     <div className="p-6 max-w-7xl mx-auto space-y-6">
@@ -196,11 +339,12 @@ export const NetworkSimulation: React.FC<NetworkSimulationProps> = ({
             {scenarios.map(sc => (
               <button
                 key={sc.scenario_id}
+                disabled={runInProgress}
                 onClick={() => {
                   setSelectedScenarioId(sc.scenario_id);
                   handleReset();
                 }}
-                className={`p-2.5 rounded-lg text-left transition-all border ${
+                className={`p-2.5 rounded-lg text-left transition-all border disabled:cursor-not-allowed disabled:opacity-50 ${
                   selectedScenarioId === sc.scenario_id
                     ? 'bg-indigo-950/60 border-indigo-500/60 shadow-md shadow-indigo-900/20'
                     : 'bg-noc-subpanel hover:bg-noc-hover border-noc-border text-noc-muted'
@@ -259,18 +403,31 @@ export const NetworkSimulation: React.FC<NetworkSimulationProps> = ({
             <p className="text-xs text-noc-muted leading-relaxed mb-4">
               Executes the four specialist towers (Performance, Infra, Conn, Services) through the Supervisory RCA Agent and Evidence Release Gate.
             </p>
+            <label className="mb-4 block space-y-1.5 text-xs text-noc-muted">
+              <span>Optional symptom chat</span>
+              <input
+                type="text"
+                maxLength={2000}
+                value={callerSymptom}
+                onChange={(event) => setCallerSymptom(event.target.value)}
+                disabled={runInProgress}
+                placeholder="e.g. Wi-Fi drops in the second-floor meeting rooms"
+                className="w-full rounded-md border border-noc-border bg-noc-subpanel px-3 py-2 text-xs text-noc-text placeholder-noc-muted disabled:opacity-50"
+              />
+              <span className="block text-[10px] leading-relaxed">Adds a post-diagnosis symptom review and opens session chat after the run. It does not steer or change the diagnosis.</span>
+            </label>
           </div>
 
           <div className="space-y-3">
             <div className="flex items-center space-x-2">
               <button
                 onClick={handleLaunchRun}
-                disabled={isLaunching || activeRun?.status === 'running'}
+                disabled={!sessionId || runInProgress}
                 className="flex-1 flex items-center justify-center space-x-2 py-2.5 px-4 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold shadow-lg shadow-indigo-600/30 transition-all disabled:opacity-50"
               >
                 <Play className="w-4 h-4 fill-current" />
                 <span>
-                  {activeRun?.status === 'running'
+                  {activeRun?.status === 'queued' || activeRun?.status === 'running'
                     ? 'Investigating Incident...'
                     : 'Execute Multi-Agent Diagnosis'}
                 </span>
@@ -278,8 +435,9 @@ export const NetworkSimulation: React.FC<NetworkSimulationProps> = ({
 
               <button
                 onClick={handleReset}
+                disabled={runInProgress}
                 title="Reset Run"
-                className="p-2.5 rounded-lg bg-noc-subpanel hover:bg-noc-hover text-noc-muted hover:text-noc-text border border-noc-border text-xs transition-colors"
+                className="p-2.5 rounded-lg bg-noc-subpanel hover:bg-noc-hover text-noc-muted hover:text-noc-text border border-noc-border text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-50"
               >
                 <RotateCcw className="w-4 h-4" />
               </button>
@@ -304,9 +462,41 @@ export const NetworkSimulation: React.FC<NetworkSimulationProps> = ({
                 </span>
               </div>
             )}
+            {activeRun?.status === 'failed' && (
+              <p role="alert" className="rounded border border-red-500/40 bg-red-950/30 px-3 py-2 text-xs text-red-300">
+                {activeRun.error || 'The investigation failed. Start a new run after checking the capture.'}
+              </p>
+            )}
+            {runError && <p role="alert" className="rounded border border-red-500/40 bg-red-950/30 px-3 py-2 text-xs text-red-300">{runError}</p>}
           </div>
         </div>
       </div>
+
+      <section
+        ref={uploadSectionRef}
+        tabIndex={-1}
+        aria-labelledby="capture-upload-heading"
+        className="bg-noc-panel border border-noc-border rounded-xl p-5 shadow-lg space-y-3 focus:outline-none focus:ring-2 focus:ring-noc-amethyst/60"
+      >
+        <div>
+          <h2 id="capture-upload-heading" className="text-sm font-bold text-noc-text">Add Telemetry & Run a New Analysis</h2>
+          <p className="mt-1 text-xs text-noc-muted">Choose a telemetry export and optionally a separate network map. Files are stored in this local NetCoop instance for the investigation session.</p>
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3 items-end">
+          <label className="block space-y-1.5 text-xs text-noc-muted">
+            <span>Telemetry (.json, .jsonl, .csv, or JSON Lines in .log)</span>
+            <input type="file" accept=".json,.jsonl,.csv,.log" onChange={(event) => setTelemetryFile(event.target.files?.[0] ?? null)} className="block w-full text-xs file:mr-3 file:rounded-md file:border-0 file:bg-indigo-600 file:px-3 file:py-2 file:text-white" />
+          </label>
+          <label className="block space-y-1.5 text-xs text-noc-muted">
+            <span>Optional topology (.json)</span>
+            <input type="file" accept=".json" onChange={(event) => setTopologyFile(event.target.files?.[0] ?? null)} className="block w-full text-xs file:mr-3 file:rounded-md file:border-0 file:bg-noc-subpanel file:px-3 file:py-2 file:text-noc-text" />
+          </label>
+          <button onClick={handleUploadRun} disabled={!telemetryFile || !sessionId || runInProgress} className="rounded-lg bg-noc-amethyst px-4 py-2.5 text-xs font-semibold text-white disabled:opacity-40">
+            {isLaunching ? 'Starting investigation…' : 'Run on uploaded data'}
+          </button>
+        </div>
+        {uploadError && <p role="alert" className="text-xs text-red-300">{uploadError}</p>}
+      </section>
 
       {/* Main Network Topology Graph Canvas */}
       <div className="space-y-4">
@@ -314,10 +504,7 @@ export const NetworkSimulation: React.FC<NetworkSimulationProps> = ({
           topology={topology}
           selectedNodeId={selectedNode?.id}
           onSelectNode={setSelectedNode}
-          rootCauseEntity={report?.suspected_root_cause}
-          symptomEntities={
-            report ? report.observed_symptom_entities : activeSymptomEntities
-          }
+          symptomEntities={report?.observed_symptom_entities ?? []}
           inferredEntities={report ? report.inferred_affected_entities : []}
         />
 

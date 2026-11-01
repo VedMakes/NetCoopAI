@@ -28,7 +28,7 @@ Unlike a monolithic diagnostic engine, NetCoop AI uses four specialist towers co
 - **Input resilience**: JSON, JSONL, and narrow or wide CSV ingestion; malformed records are quarantined, missing timestamps are not invented, and unknown metrics or incompatible units are surfaced as data quality issues.
 - **Network profiles**: Versioned YAML profiles map source field names, entity aliases, metric names and units, counter semantics, service roles, topology relationships, anchors, completeness, and supported rule thresholds without changing tower code.
 - **Evidence-aware diagnosis**: Concurrent causes remain visible, sparse temporal signals are called out, and missing paths in partial or unknown topologies do not become outage proof.
-- **Supplemental triage**: After the evidence gate makes its decision, the report can include topology reachability traces between observed and predicted-affected entities. These traces do not change the diagnosis and are not presented as proof of causation. `diagnose --symptom "…"` optionally invokes a separate symptom context agent after publication. It receives the report, specialist evidence, relevant observations, and topology addendum; it cannot change the certified diagnosis. With `--llm off` it uses conservative local rules; with configured `--llm auto` or `--llm on` it may use a separate model call.
+- **Supplemental triage**: After the evidence gate makes its decision, the report can include topology reachability traces between observed and predicted-affected entities. These traces do not change the diagnosis and are not presented as proof of causation. `diagnose --symptom-chat "…"` optionally invokes a separate symptom context agent after publication and opens session chat. It receives the report, specialist evidence, relevant observations, and topology addendum; it cannot change the certified diagnosis. With `--llm off` it uses conservative local rules; with configured `--llm auto` or `--llm on` it may use a separate model call.
 - **100% Offline Determinism with Optional LLM Mode**:
   - Deterministic diagnosis runs offline without API keys or network calls.
   - Optional `--llm auto` and `--llm on` modes can enrich reports when a supported provider is configured.
@@ -119,6 +119,23 @@ export OPENROUTER_API_KEY="your-key"
 uv run netcoop triage ./office-capture --llm auto
 ```
 
+### Browser Dashboard
+
+Run the local API and web client in separate terminals from the repository root:
+The dashboard requires Node.js 18 or newer and npm.
+
+```bash
+# Terminal 1: API
+uv run netcoop api --host 127.0.0.1 --port 8000
+
+# Terminal 2: React/Vite dashboard
+cd web
+npm ci
+npm run dev
+```
+
+Open `http://localhost:5173`. The dashboard lets you create and switch between saved investigation sessions, run a packaged scenario, upload one telemetry export (`.json`, `.jsonl`, `.csv`, or `.log` containing JSON Lines, up to 20 MB), and optionally upload a JSON topology (up to 5 MB). The optional symptom chat field asks for a post-diagnosis comparison and opens session chat when the run finishes; it does not steer the diagnosis. The HTTP API accepts file contents and writes them under a generated application-owned directory; it does not accept arbitrary server filesystem paths. Runs, reports, agent events, and assistant conversation turns persist under the ignored `data/netcoop/` directory. CLI and dashboard use the same local sessions and run records. The assistant keeps one conversation per session and can compare up to the five most recent completed runs. Its “Add telemetry & re-analyze” action opens the explicit upload flow, starts a separate run in the same session, and returns to the assistant when analysis finishes; chat messages are never treated as telemetry. Use the dashboard refresh button to import sessions created by another CLI/API process. If the API process stops during an active diagnosis, that run is marked interrupted on restart; completed results can be reopened.
+
 ---
 
 ## CLI Usage Guide
@@ -152,9 +169,9 @@ Diagnoses any scenario folder or raw telemetry file.
 # Interactive Rich terminal output
 uv run netcoop diagnose fixtures/scenarios/link_congestion
 
-# Quick field workflow: local capture, site identity, optional caller symptom
+# Quick field workflow: local capture, site identity, optional symptom chat
 uv run netcoop triage ./office-capture --site office-east \
-  --symptom "Wi-Fi drops in the second-floor meeting rooms"
+  --symptom-chat "Wi-Fi drops in the second-floor meeting rooms"
 
 # Supply a separate sitemap when it is not inside the capture directory
 uv run netcoop triage ./office-capture --site office-east --sitemap ./office-east-topology.json
@@ -183,17 +200,32 @@ uv run netcoop diagnose fixtures/scenarios/dns_failure --profile config/profiles
 uv run netcoop diagnose fixtures/scenarios/dns_failure --db incident.db
 
 # Add an optional, post-diagnosis comparison with the caller's description
-uv run netcoop diagnose fixtures/scenarios/dns_failure --symptom "Users cannot resolve hostnames"
+uv run netcoop diagnose fixtures/scenarios/dns_failure --symptom-chat "Users cannot resolve hostnames"
 uv run netcoop triage ./office-capture --explain
 ```
 
-`triage` is a field-friendly alias for `diagnose`. The first argument is local sample/capture data: a telemetry file, or a directory containing telemetry and optionally `topology.json`. `--sitemap`/`--topology` supplies a separate topology JSON; a saved site map at `config/sites/<site>/topology.json` is loaded automatically. `--site` tags the report and automatically loads `config/profiles/<site>.yaml` (or `.yml`) when present; otherwise NetCoop warns that it is using generic mappings. Use `--profile` to select another explicit profile. `profile-init` drafts a profile from local sample data and `profile-validate` checks it. The symptom agent runs only when `--symptom` is provided. This is a local CLI workflow; there is no browser-based upload endpoint.
+`triage` is a field-friendly alias for `diagnose`. The first argument is local sample/capture data: a telemetry file, or a directory containing telemetry and optionally `topology.json`. `--sitemap`/`--topology` supplies a separate topology JSON; a saved site map at `config/sites/<site>/topology.json` is loaded automatically. `--site` tags the report and automatically loads `config/profiles/<site>.yaml` (or `.yml`) when present; otherwise NetCoop warns that it is using generic mappings. Use `--profile` to select another explicit profile. `profile-init` drafts a profile from local sample data and `profile-validate` checks it. The symptom agent runs only when `--symptom-chat` is provided. That flag also opens saved session chat after the run; use `--chat` to open chat without a symptom comparison. The browser dashboard also supports uploading telemetry and an optional topology map; see Browser Dashboard above.
 
-Path triage is part of the report as a separate supplemental section. Its queries run after the gate decision and report reachable, not reachable in recorded topology, or unknown, with any available route/evidence references. Incomplete topology can make a negative result inconclusive. The optional `--symptom` agent reports aligned, mismatch, or unclear and explains its comparison. Its model mode follows `--llm`; model failure falls back to local rules and is disclosed in the addendum. This remains a consistency check, not a diagnosis input.
+Path triage is part of the report as a separate supplemental section. Its queries run after the gate decision and report reachable, not reachable in recorded topology, or unknown, with any available route/evidence references. Incomplete topology can make a negative result inconclusive. The optional `--symptom-chat` agent reports aligned, mismatch, or unclear and explains its comparison. Its model mode follows `--llm`; model failure falls back to local rules and is disclosed in the addendum. This remains a consistency check, not a diagnosis input.
 
 Reports distinguish entities supported directly by findings from topology-inferred impact candidates. Inference follows declared service dependencies or physical links for at most three hops and reports the path and topology evidence refs; it does not assert confirmed user impact. When conflicting stored evidence cannot resolve competing hypotheses, the supervisor abstains and includes a targeted `operator_questions` list. Specialist reviews currently inspect only the supplied incident capture and report observation IDs, timestamps, sources, values, and limitations. They do not run live network probes; missing signals are called out explicitly.
 
-Use `--explain` to stream the workflow to stderr while diagnosis runs: intake warnings, specialist findings, detected conflicts, task selection scores, evidence provenance samples, new-evidence counts, unavailable signals, peer/task handoffs, gate checks, and the final report. The task selection score is a heuristic for ordering work, not a formal probability. The normal report remains on stdout (so `--format json` stays machine-readable). Explanations expose findings and concise rationale summaries, not private model chain-of-thought. If `--symptom` is also set, its post-gate run and result are shown separately.
+Use `--explain` to stream the workflow to stderr while diagnosis runs: intake warnings, specialist findings, detected conflicts, task selection scores, evidence provenance samples, new-evidence counts, unavailable signals, peer/task handoffs, gate checks, and the final report. The task selection score is a heuristic for ordering work, not a formal probability. The normal report remains on stdout (so `--format json` stays machine-readable). Explanations expose findings and concise rationale summaries, not private model chain-of-thought. If `--symptom-chat` is also set, its post-gate run and result are shown separately.
+
+### Shared CLI sessions and chat
+
+CLI sessions are stored alongside dashboard sessions under `data/netcoop/`. Create, list, select, and resume them with:
+
+```bash
+uv run netcoop sessions new --title "Office east"
+uv run netcoop sessions list
+uv run netcoop sessions use session-<id>
+uv run netcoop sessions current
+uv run netcoop sessions chat                 # resume selected session
+uv run netcoop sessions chat session-<id>    # open a particular session
+```
+
+Pass `--session session-<id>` to `triage`/`diagnose` to attach a run to an existing session, or `--new-session` to create one. Without either option, the CLI reuses its selected session or selects the most recently updated session. `--chat` and `--symptom-chat` open read-only session Q&A after the report. Type `/exit` or press Ctrl+C to close chat; the session and transcript remain available from both CLI and dashboard. Chat cannot ingest telemetry: rerun `triage` with a new capture and the same `--session` to add another run to that conversation.
 
 ### 5. Inspect Persisted Incidents (`inspect`)
 Queries the SQLite Knowledge Plane to audit tower findings, event bus histories, and certified final reports for an incident.
@@ -238,8 +270,6 @@ The JSON report keeps `affected_devices` as a compatibility union, and now separ
 
 - [Local Input Formats](docs/INPUT_FORMATS.md)
 - [Network Profiles and Adaptation](docs/NETWORK_PROFILES.md)
-- [System Architecture](docs/ARCHITECTURE.md)
-- [Rubric Evidence and Evaluation Limits](docs/RUBRIC_EVIDENCE.md)
 - [3-5 Minute Demo Guide](docs/DEMO_SCRIPT.md)
 
 ---

@@ -39,23 +39,46 @@ export interface TopologyGraph {
 }
 
 export interface RunCreateRequest {
-  scenario_id?: string;
-  target_path?: string;
+  scenario_id: string;
   incident_id?: string;
+  session_id?: string;
   llm?: 'off' | 'auto' | 'on';
-  symptom?: string;
+  symptom_chat?: string;
+  site?: string;
+}
+
+export interface UploadRunRequest {
+  telemetry_filename: string;
+  telemetry_content: string;
+  topology_filename?: string;
+  topology_content?: string;
+  incident_id?: string;
+  session_id?: string;
+  llm?: 'off' | 'auto' | 'on';
+  symptom_chat?: string;
   site?: string;
 }
 
 export interface RunStatusResponse {
   run_id: string;
   incident_id: string;
+  session_id?: string;
   scenario_id?: string;
   status: 'queued' | 'running' | 'completed' | 'failed';
   created_at: string;
   started_at?: string;
   completed_at?: string;
   error?: string;
+}
+
+export interface InvestigationSession {
+  session_id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+  current_run_id?: string | null;
+  run_count: number;
+  runs?: RunStatusResponse[];
 }
 
 export interface ExecutionEvent {
@@ -190,7 +213,19 @@ export interface FinalReport {
   operator_questions?: string[];
   data_quality_warnings?: string[];
   orchestration_warnings?: string[];
+  symptom_reasoning?: SymptomReasoning | null;
   generated_at?: string;
+}
+
+export interface SymptomReasoning {
+  reported_symptom: string;
+  status: 'aligned' | 'mismatch' | 'unclear';
+  recognized_domains: string[];
+  diagnosed_fault_codes: string[];
+  matched_fault_codes: string[];
+  explanation: string;
+  agent_mode: 'deterministic' | 'llm' | 'deterministic_fallback';
+  warnings: string[];
 }
 
 export interface GateCheckResult {

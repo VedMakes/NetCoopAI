@@ -6,7 +6,6 @@ interface TopologyViewProps {
   topology: TopologyGraph | null;
   selectedNodeId?: string;
   onSelectNode: (node: TopologyNode | null) => void;
-  rootCauseEntity?: string;
   symptomEntities?: string[];
   inferredEntities?: string[];
 }
@@ -28,7 +27,6 @@ export const TopologyView: React.FC<TopologyViewProps> = ({
   topology,
   selectedNodeId,
   onSelectNode,
-  rootCauseEntity,
   symptomEntities = [],
   inferredEntities = [],
 }) => {
@@ -68,13 +66,13 @@ export const TopologyView: React.FC<TopologyViewProps> = ({
   };
 
   const getNodeStatus = (node: TopologyNode): 'nominal' | 'symptom' | 'impacted' | 'probable_root_cause' => {
-    if (rootCauseEntity && (node.id.includes(rootCauseEntity) || rootCauseEntity.includes(node.id))) {
+    if (node.status === 'probable_root_cause') {
       return 'probable_root_cause';
     }
-    if (symptomEntities.some(s => node.id.includes(s) || s.includes(node.id))) {
+    if (symptomEntities.includes(node.id)) {
       return 'symptom';
     }
-    if (inferredEntities.some(i => node.id.includes(i) || i.includes(node.id))) {
+    if (inferredEntities.includes(node.id)) {
       return 'impacted';
     }
     return node.status || 'nominal';

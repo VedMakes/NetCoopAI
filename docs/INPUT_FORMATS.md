@@ -1,6 +1,6 @@
 # Local data and topology inputs
 
-NetCoop reads files from the machine where the CLI runs. It does not currently provide a browser upload page or connect directly to network devices. Use `netcoop triage` with a telemetry file or capture directory, and optionally provide a network map.
+The CLI reads files from the machine where it runs. Use `netcoop triage` with a telemetry file or capture directory, and optionally provide a network map. The browser dashboard accepts telemetry file contents and an optional topology JSON upload; it does not connect directly to network devices.
 
 ## Quick start with a capture directory
 
@@ -15,7 +15,7 @@ netcoop triage ./office-capture --site office-east \
   --symptom "Wi-Fi drops in the second-floor meeting rooms"
 ```
 
-The telemetry file can also be supplied directly. Supported telemetry inputs are JSON, JSONL, and CSV. A standalone map can be supplied with either `--sitemap` or `--topology`:
+The telemetry file can also be supplied directly. Supported telemetry inputs are JSON, JSONL, CSV, and `.log` files whose contents are JSON Lines (one JSON object per line). A `.log` suffix does not enable parsing arbitrary raw syslog text. A standalone map can be supplied with either `--sitemap` or `--topology`:
 
 ```bash
 netcoop triage ./office-capture/telemetry.jsonl \
@@ -42,6 +42,10 @@ Topology maps are JSON objects with a list of physical links. `service_dependenc
 ```json
 {
   "schema_version": "1.0",
+  "nodes": [
+    { "entity_id": "DNS-OFFICE-01", "name": "Office DNS", "role": "dns_resolver", "entity_type": "service" },
+    { "entity_id": "SPARE-SW-01", "name": "Spare switch", "role": "access_switch" }
+  ],
   "links": [
     {
       "link_id": "LINK-AP-TO-IDF",
@@ -63,6 +67,8 @@ Topology maps are JSON objects with a list of physical links. `service_dependenc
 ```
 
 Each link needs `source_entity` and `target_entity`; a stable `link_id` is recommended so report references remain understandable. Source field names may be mapped in the site profile. `topology_completeness` belongs in the profile: use `complete` only when the map is intended to cover the whole site. For partial or unknown maps, an absent route is not treated as proof that devices cannot communicate.
+
+The optional `nodes` list supports isolated devices and services that are not endpoints of a declared link. Each node needs `entity_id`; `name`, `role`, and `entity_type` are optional display details. Telemetry entities missing from the map are added to the dashboard graph as device nodes.
 
 ## Site files
 

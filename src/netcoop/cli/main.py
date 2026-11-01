@@ -20,8 +20,10 @@ from typing import Any
 import typer
 import yaml
 from rich.console import Console, Theme
+from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.progress import BarColumn, MofNCompleteColumn, Progress, SpinnerColumn, TextColumn
+from rich.prompt import Prompt
 from rich.table import Table
 
 from netcoop import __version__
@@ -60,6 +62,8 @@ app = typer.Typer(
     help="NetCoop AI: Evidence-Backed Multi-Agent Network Fault Diagnosis",
     no_args_is_help=True,
 )
+sessions_app = typer.Typer(name="sessions", help="List and select shared local investigation sessions.", no_args_is_help=True)
+app.add_typer(sessions_app, name="sessions")
 CLI_THEME = Theme({
     "cyan": "#C7A7EF",
     "bright_cyan": "#DEC9FA",
@@ -80,6 +84,126 @@ CLI_THEME = Theme({
 })
 console = Console(theme=CLI_THEME)
 explain_console = Console(theme=CLI_THEME, stderr=True)
+chat_console = Console(theme=CLI_THEME, stderr=True)
+
+
+def _local_run_manager():
+    # Delayed import avoids the CLI/service import cycle: the API reuses CLI ingestion helpers.
+    from netcoop_api.service import run_manager
+
+    return run_manager
+
+
+def _cli_session_state_path(manager) -> Path:
+    return manager.storage_dir / "cli-state.json"
+
+
+def _save_cli_session_id(manager, session_id: str) -> None:
+    path = _cli_session_state_path(manager)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".json.tmp")
+    temporary.write_text(json.dumps({"active_session_id": session_id}), encoding="utf-8")
+    temporary.replace(path)
+
+
+def _select_cli_session(
+    *,
+    session_id: str | None,
+    create_new: bool,
+    title: str = "CLI investigation",
+) -> str:
+    manager = _local_run_manager()
+    manager.refresh_external_state()
+    if session_id and create_new:
+        raise ValueError("--session and --new-session cannot be used together")
+    if create_new:
+        selected = manager.create_session(title)
+    elif session_id:
+        selected = manager.get_session(session_id)
+        if selected is None:
+            raise ValueError(f"Session '{session_id}' was not found")
+    else:
+        active_id = None
+        try:
+            state = json.loads(_cli_session_state_path(manager).read_text(encoding="utf-8"))
+            active_id = state.get("active_session_id") if isinstance(state, dict) else None
+        except (OSError, json.JSONDecodeError):
+            pass
+        selected = manager.get_session(active_id) if isinstance(active_id, str) else None
+        if selected is None:
+            available = manager.list_sessions()
+            selected = manager.get_session(available[0].session_id) if available else None
+        if selected is None:
+            selected = manager.create_session(title)
+    _save_cli_session_id(manager, selected.session_id)
+    return selected.session_id
+
+
+@sessions_app.command("list")
+def list_sessions() -> None:
+    """List sessions shared with the local web dashboard."""
+    manager = _local_run_manager()
+    manager.refresh_external_state()
+    current_id = None
+    try:
+        state = json.loads(_cli_session_state_path(manager).read_text(encoding="utf-8"))
+        current_id = state.get("active_session_id") if isinstance(state, dict) else None
+    except (OSError, json.JSONDecodeError):
+        pass
+    table = make_table(title="Investigation Sessions")
+    table.add_column("Active", justify="center")
+    table.add_column("Session ID", style="cyan")
+    table.add_column("Title")
+    table.add_column("Runs", justify="right")
+    table.add_column("Updated")
+    for session in manager.list_sessions():
+        table.add_row(
+            "*" if session.session_id == current_id else "",
+            session.session_id,
+            session.title,
+            str(session.run_count),
+            session.updated_at.strftime("%Y-%m-%d %H:%M UTC"),
+        )
+    if not manager.list_sessions():
+        console.print("No sessions yet. Create one with [cyan]netcoop sessions new[/cyan].")
+    else:
+        console.print(table)
+
+
+@sessions_app.command("new")
+def new_session(
+    title: str = typer.Option("CLI investigation", "--title", help="Readable session title."),
+) -> None:
+    """Create and select a session shared with the dashboard."""
+    session_id = _select_cli_session(session_id=None, create_new=True, title=title)
+    console.print(f"[green]Created and selected session[/green] [cyan]{session_id}[/cyan]")
+
+
+@sessions_app.command("use")
+def use_session(session_id: str = typer.Argument(..., help="Session ID shown by `netcoop sessions list`.")) -> None:
+    """Select an existing shared session for subsequent CLI runs."""
+    try:
+        selected_id = _select_cli_session(session_id=session_id, create_new=False)
+    except ValueError as exc:
+        console.print(f"[bold red]{exc}[/bold red]")
+        raise typer.Exit(code=2)
+    console.print(f"[green]Selected session[/green] [cyan]{selected_id}[/cyan]")
+
+
+@sessions_app.command("current")
+def current_session() -> None:
+    """Show the session selected for subsequent CLI runs."""
+    manager = _local_run_manager()
+    try:
+        state = json.loads(_cli_session_state_path(manager).read_text(encoding="utf-8"))
+        session_id = state.get("active_session_id") if isinstance(state, dict) else None
+    except (OSError, json.JSONDecodeError):
+        session_id = None
+    session = manager.get_session(session_id) if isinstance(session_id, str) else None
+    if session is None:
+        console.print("No active CLI session. Use [cyan]netcoop sessions new[/cyan].")
+        return
+    console.print(f"[cyan]{session.session_id}[/cyan] · {session.title} · {session.run_count} run(s)")
 
 
 def make_table(*args: Any, **kwargs: Any) -> Table:
@@ -96,6 +220,71 @@ def _soft_status(message: str):
     if not console.is_terminal or os.environ.get("NO_COLOR"):
         return nullcontext()
     return console.status(f"[cyan]✦ {message}[/cyan]", spinner="dots")
+
+
+def _run_session_chat(session_id: str, llm_mode: str) -> None:
+    """Open the shared session assistant; Ctrl+C closes chat without deleting the session."""
+    from netcoop_api.assistant import assistant_service
+    from netcoop_api.schemas import AssistantRequest
+
+    manager = _local_run_manager()
+    session = manager.get_session(session_id)
+    if session is None:
+        chat_console.print(f"[red]Session {session_id} is no longer available.[/red]")
+        return
+    completed_count = sum(run.status == "completed" for run in session.runs)
+    chat_console.print(Panel(
+        f"[bold]Session:[/bold] {session.title} · {session_id}\n"
+        f"[bold]Completed runs in context:[/bold] {completed_count} (up to 5 most recent)\n"
+        "Ask about diagnoses, symptoms, evidence, or compare runs. New telemetry must be added with a new triage command.\n"
+        "Type [cyan]/exit[/cyan] or press [cyan]Ctrl+C[/cyan] to close chat; the session remains available in CLI and dashboard.",
+        title="NetCoop Session Chat",
+        border_style="magenta",
+    ))
+    while True:
+        try:
+            question = Prompt.ask("[bright_cyan]You[/bright_cyan]", console=chat_console).strip()
+        except (KeyboardInterrupt, EOFError):
+            chat_console.print("\n[dim]Chat closed. The session is saved and remains available.[/dim]")
+            return
+        if not question:
+            continue
+        if question.casefold() in {"/exit", "/quit", "/close"}:
+            chat_console.print("[dim]Chat closed. The session is saved and remains available.[/dim]")
+            return
+        try:
+            response = assistant_service.answer_session_question(
+                session_id,
+                AssistantRequest(question=question, llm=llm_mode),
+            )
+            chat_console.print(Panel(
+                Markdown(response.answer),
+                title=f"NetCoop · {response.provider_used}",
+                border_style="cyan",
+            ))
+        except Exception as exc:
+            chat_console.print(f"[bold red]Chat response failed:[/bold red] {exc}")
+
+
+@sessions_app.command("chat")
+def chat_session(
+    session_id: str | None = typer.Argument(None, help="Session ID; defaults to the selected CLI session."),
+    llm: str = typer.Option("off", "--llm", help="LLM mode for answers: off, auto, or on."),
+) -> None:
+    """Resume read-only Q&A for a saved investigation session."""
+    try:
+        selected_id = _select_cli_session(
+            session_id=session_id,
+            create_new=False,
+            title="CLI investigation",
+        )
+    except ValueError as exc:
+        console.print(f"[bold red]{exc}[/bold red]")
+        raise typer.Exit(code=2)
+    if llm not in {"off", "auto", "on"}:
+        console.print("[bold red]--llm must be off, auto, or on.[/bold red]")
+        raise typer.Exit(code=2)
+    _run_session_chat(selected_id, llm)
 
 
 def _demo_progress() -> Progress:
@@ -266,7 +455,7 @@ def validate(
 def ingest(
     file_path: Path = typer.Argument(
         ...,
-        help="Path to telemetry file (.json, .csv, .jsonl) to ingest.",
+        help="Path to telemetry file (.json, .csv, .jsonl, or JSON Lines in a .log file) to ingest.",
         exists=True,
         readable=True,
     ),
@@ -331,7 +520,7 @@ def _load_observations_from_target(
     if target_path.is_dir():
         # Check for telemetry file
         telemetry_file = None
-        for cand in ["telemetry.jsonl", "telemetry.json", "telemetry.csv"]:
+        for cand in ["telemetry.jsonl", "telemetry.json", "telemetry.csv", "telemetry.log"]:
             if (target_path / cand).exists():
                 telemetry_file = target_path / cand
                 break
@@ -592,7 +781,7 @@ def _load_topology_file(
 def diagnose(
     target_path: Path = typer.Argument(
         ...,
-        help="Path to telemetry file (.json, .jsonl, .csv) or scenario directory.",
+        help="Path to telemetry file (.json, .jsonl, .csv, or JSON Lines in a .log file) or scenario directory.",
         exists=True,
         readable=True,
     ),
@@ -611,9 +800,12 @@ def diagnose(
         None, "--topology", "--sitemap", exists=True, readable=True,
         help="Optional standalone topology JSON; overrides topology.json inside a capture directory.",
     ),
-    symptom: str | None = typer.Option(
-        None, "--symptom", help="Optional caller-reported concern; compared after diagnosis and never steers it."
+    symptom_chat: str | None = typer.Option(
+        None, "--symptom-chat", help="Optional caller symptom; reviewed after diagnosis, then opens session chat."
     ),
+    session_id: str | None = typer.Option(None, "--session", help="Use this existing shared investigation session."),
+    new_session: bool = typer.Option(False, "--new-session", help="Create a new session for this diagnosis."),
+    chat: bool = typer.Option(False, "--chat", help="Open session Q&A after diagnosis (also enabled by --symptom-chat)."),
     explain: bool = typer.Option(
         False, "--explain", help="Stream the live diagnostic workflow and agent handoffs to stderr."
     ),
@@ -623,8 +815,8 @@ def diagnose(
     if site is not None and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", site):
         console.print("[bold red]Invalid site ID:[/bold red] use letters, numbers, dots, underscores, or hyphens.")
         raise typer.Exit(code=2)
-    if symptom is not None and not symptom.strip():
-        console.print("[bold red]Invalid symptom:[/bold red] --symptom requires non-empty caller wording.")
+    if symptom_chat is not None and not symptom_chat.strip():
+        console.print("[bold red]Invalid symptom chat:[/bold red] --symptom-chat requires non-empty caller wording.")
         raise typer.Exit(code=2)
     if profile_path is None and site:
         profile_candidates = [
@@ -664,14 +856,33 @@ def diagnose(
         console.print(f"[bold red]No observations loaded from {target_path}.[/bold red]")
         raise typer.Exit(code=1)
 
-    # Setup repository
-    repo = SQLiteRepository(db_path or ":memory:")
-
     # Setup RCA Agent based on LLM mode
     try:
         rca_provider = get_rca_provider(llm_mode=llm)
     except ValueError as e:
         console.print(f"[bold red]Configuration Error:[/bold red] {e}")
+        raise typer.Exit(code=1)
+
+    try:
+        run_manager = _local_run_manager()
+        selected_session_id = _select_cli_session(
+            session_id=session_id,
+            create_new=new_session,
+            title=f"{site} investigation" if site else "CLI investigation",
+        )
+        cli_run = run_manager.create_cli_run(
+            session_id=selected_session_id,
+            incident_id=inc_id,
+            input_path=target_path.resolve(),
+            topology_path=topology_path.resolve() if topology_path else None,
+            entity_aliases=network_profile.aliases() if network_profile else None,
+        )
+        repo = SQLiteRepository(db_path or cli_run.repository_path)
+        cli_run.repository = repo
+        # Keep JSON/Markdown stdout machine-readable; status belongs on stderr.
+        chat_console.print(f"[dim]Session {selected_session_id} · run {cli_run.run_id}[/dim]")
+    except Exception as exc:
+        console.print(f"[bold red]Could not prepare the local session:[/bold red] {exc}")
         raise typer.Exit(code=1)
 
     rca_agent = SupervisoryRCAAgent(provider=rca_provider, llm_mode=llm)
@@ -709,33 +920,46 @@ def diagnose(
         if site is not None:
             report = report.model_copy(update={"site_id": site})
             repo.insert_final_report(report)
-        if symptom is not None:
+        if symptom_chat is not None:
             symptom_agent = SymptomReasoningAgent(llm_mode=llm)
             if explain:
-                explain_console.print("[bright_cyan]✦ symptom[/bright_cyan]  Running optional symptom comparison after the evidence gate; it cannot change the diagnosis.")
+                explain_console.print("[bright_cyan]✦ symptom-chat[/bright_cyan]  Running optional symptom comparison after the evidence gate; it cannot change the diagnosis.")
             if format_opt.lower() == "rich":
                 with _soft_status("Comparing caller wording with the published evidence"):
                     symptom_addendum = symptom_agent.analyze(
-                        symptom=symptom,
+                        symptom=symptom_chat,
                         report=report,
                         observations=observations,
                         tower_reports=repo.get_tower_reports(inc_id),
                     )
             else:
                 symptom_addendum = symptom_agent.analyze(
-                    symptom=symptom,
+                    symptom=symptom_chat,
                     report=report,
                     observations=observations,
                     tower_reports=repo.get_tower_reports(inc_id),
                 )
             report = report.model_copy(update={"symptom_reasoning": symptom_addendum})
             if explain:
-                explain_console.print(f"[bright_cyan]✦ symptom[/bright_cyan]  Result: {symptom_addendum.status}; {symptom_addendum.explanation}")
+                explain_console.print(f"[bright_cyan]✦ symptom-chat[/bright_cyan]  Result: {symptom_addendum.status}; {symptom_addendum.explanation}")
             repo.insert_final_report(report)
         gate_res = repo.get_gate_result(inc_id)
+        run_manager.complete_cli_run(
+            cli_run.run_id,
+            report=report,
+            observations=observations,
+            source_repository=repo,
+        )
     except EvidenceGateRejectionError as e:
+        run_manager.fail_cli_run(cli_run.run_id, str(e))
         console.print(f"[bold red]Evidence Release Gate Rejection:[/bold red] {e}")
         raise typer.Exit(code=2)
+    except Exception as e:
+        run_manager.fail_cli_run(cli_run.run_id, str(e))
+        console.print(f"[bold red]Diagnosis failed:[/bold red] {e}")
+        raise typer.Exit(code=1)
+
+    open_chat = chat or symptom_chat is not None
 
     # Format outputs
     if format_opt.lower() == "json":
@@ -745,6 +969,8 @@ def diagnose(
             console.print(f"[green]Saved JSON report to {output_path}[/green]")
         else:
             sys.stdout.write(output_text + "\n")
+        if open_chat:
+            _run_session_chat(selected_session_id, llm)
         return
 
     if format_opt.lower() == "markdown":
@@ -754,6 +980,8 @@ def diagnose(
             console.print(f"[green]Saved Markdown report to {output_path}[/green]")
         else:
             sys.stdout.write(output_text + "\n")
+        if open_chat:
+            _run_session_chat(selected_session_id, llm)
         return
 
     # Default: Rich Terminal Display
@@ -872,6 +1100,9 @@ def diagnose(
         md_text = render_markdown_report(report, gate_result=gate_res)
         output_path.write_text(md_text, encoding="utf-8")
         console.print(f"[green]Saved summary report to {output_path}[/green]")
+
+    if open_chat:
+        _run_session_chat(selected_session_id, llm)
 
 
 app.command("triage")(diagnose)

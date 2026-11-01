@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import threading
 from collections import defaultdict
@@ -20,7 +21,7 @@ class ExecutionEventSink:
         self._lock = threading.Lock()
         self._events: dict[str, list[ExecutionEventModel]] = defaultdict(list)
         self._subscribers: dict[str, list[asyncio.Queue[ExecutionEventModel | None]]] = defaultdict(list)
-        self._closed_runs: set[str] = set()
+        self._closed_runs: dict[str, str] = {}
         self._main_loop: asyncio.AbstractEventLoop | None = None
 
     def set_loop(self, loop: asyncio.AbstractEventLoop) -> None:
@@ -44,10 +45,12 @@ class ExecutionEventSink:
             except Exception as exc:
                 logger.debug(f"Failed to deliver event to subscriber: {exc}")
 
-    def close_run(self, run_id: str) -> None:
+    def close_run(self, run_id: str, status: str = "completed") -> None:
         """Notifies subscribers that the run stream has ended."""
+        if status not in {"completed", "failed"}:
+            status = "closed"
         with self._lock:
-            self._closed_runs.add(run_id)
+            self._closed_runs[run_id] = status
             queues = list(self._subscribers.get(run_id, []))
 
         for q in queues:
@@ -64,27 +67,51 @@ class ExecutionEventSink:
         with self._lock:
             return list(self._events.get(run_id, []))
 
+    def restore_run(
+        self,
+        run_id: str,
+        events: list[ExecutionEventModel],
+        *,
+        closed: bool,
+        status: str = "completed",
+    ) -> None:
+        """Restore persisted event history for a completed or interrupted run."""
+        if status not in {"completed", "failed"}:
+            status = "closed"
+        with self._lock:
+            self._events[run_id] = list(events)
+            if closed:
+                self._closed_runs[run_id] = status
+
     async def subscribe(self, run_id: str) -> AsyncGenerator[str, None]:
         """Async generator yielding Server-Sent Events for a run_id."""
         queue: asyncio.Queue[ExecutionEventModel | None] = asyncio.Queue()
 
-        # Send any past events first
-        past_events = self.get_events(run_id)
-        for evt in past_events:
-            yield f"data: {evt.model_dump_json()}\n\n"
-
+        # Snapshot and subscribe atomically so events emitted between the replay
+        # snapshot and subscriber registration are not lost.
         with self._lock:
-            if run_id in self._closed_runs:
-                yield "event: done\ndata: {\"status\": \"completed\"}\n\n"
-                return
-            self._subscribers[run_id].append(queue)
+            past_events = list(self._events.get(run_id, []))
+            terminal_status = self._closed_runs.get(run_id)
+            if terminal_status is None:
+                self._subscribers[run_id].append(queue)
 
         try:
+            for evt in past_events:
+                yield f"data: {evt.model_dump_json()}\n\n"
+
+            if terminal_status is not None:
+                payload = json.dumps({"status": terminal_status})
+                yield f"event: done\ndata: {payload}\n\n"
+                return
+
             while True:
                 item = await queue.get()
                 if item is None:
                     # Stream complete
-                    yield "event: done\ndata: {\"status\": \"completed\"}\n\n"
+                    with self._lock:
+                        terminal_status = self._closed_runs.get(run_id, "closed")
+                    payload = json.dumps({"status": terminal_status})
+                    yield f"event: done\ndata: {payload}\n\n"
                     break
                 yield f"data: {item.model_dump_json()}\n\n"
         finally:

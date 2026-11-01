@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 import uuid
 from datetime import datetime, timezone
@@ -15,6 +16,7 @@ from netcoop.cli.main import (
     load_rules,
 )
 from netcoop.communication.fabric import IntegrationFabric
+from netcoop.configuration.profile import NetworkProfile
 from netcoop.features.models import DerivedFeature
 from netcoop.features.pipeline import FeaturePipeline
 from netcoop.models.enums import TowerId
@@ -30,6 +32,7 @@ from netcoop.storage.sqlite import SQLiteRepository
 from netcoop.supervisor.agent import SupervisoryRCAAgent
 from netcoop.supervisor.gate import EvidenceReleaseGate
 from netcoop.supervisor.runtime import SupervisorRuntime
+from netcoop.supervisor.symptom_agent import SymptomReasoningAgent
 from netcoop_api.events import event_sink
 from netcoop_api.schemas import (
     DerivedFeatureModel,
@@ -41,15 +44,20 @@ from netcoop_api.schemas import (
     RunStatusResponse,
     ScenarioDetail,
     ScenarioSummary,
+    SessionDetail,
+    SessionSummary,
     TelemetryObservationModel,
     TelemetryResponse,
     TopologyGraph,
     TopologyLink,
     TopologyNode,
     TowerReportSummary,
+    UploadRunRequest,
 )
 
 logger = logging.getLogger(__name__)
+_RUN_ID_RE = re.compile(r"run-[a-f0-9]{10}\Z")
+_SESSION_ID_RE = re.compile(r"session-[a-f0-9]{12}\Z")
 
 SCENARIO_CATALOG_META = {
     "healthy": {
@@ -98,11 +106,25 @@ SCENARIO_CATALOG_META = {
 
 
 class RunRecord:
-    def __init__(self, run_id: str, incident_id: str, scenario_id: str | None, target_path: Path):
+    def __init__(
+        self,
+        run_id: str,
+        incident_id: str,
+        scenario_id: str | None,
+        target_path: Path,
+        repository_path: Path,
+        session_id: str,
+        topology_path: Path | None = None,
+        entity_aliases: dict[str, str] | None = None,
+    ):
         self.run_id = run_id
         self.incident_id = incident_id
         self.scenario_id = scenario_id
         self.target_path = target_path
+        self.repository_path = repository_path
+        self.session_id = session_id
+        self.topology_path = topology_path
+        self.entity_aliases = entity_aliases or {}
         self.status = "queued"
         self.created_at = datetime.now(timezone.utc)
         self.started_at: datetime | None = None
@@ -115,15 +137,431 @@ class RunRecord:
         self.tower_reports: dict[TowerId, TowerReport] = {}
         self.gate_result: Any = None
         self.repository: SQLiteRepository | None = None
+        self.assistant_history: list[dict[str, str]] = []
 
 
 class RunManager:
     """Coordinates benchmark scenarios, runs, and artifacts."""
 
-    def __init__(self, scenarios_dir: Path | None = None):
-        self.scenarios_dir = scenarios_dir or Path("fixtures/scenarios")
+    def __init__(self, scenarios_dir: Path | None = None, storage_dir: Path | None = None):
+        self.scenarios_dir = (
+            scenarios_dir
+            if scenarios_dir is not None
+            else Path(__file__).resolve().parents[2] / "fixtures" / "scenarios"
+        ).resolve()
+        self.storage_dir = (
+            storage_dir
+            if storage_dir is not None
+            else Path(__file__).resolve().parents[2] / "data" / "netcoop"
+        ).resolve()
+        self.uploads_dir = self.storage_dir / "uploads"
+        self.runs_dir = self.storage_dir / "runs"
+        self.sessions_dir = self.storage_dir / "sessions"
+        self.uploads_dir.mkdir(parents=True, exist_ok=True)
+        self.runs_dir.mkdir(parents=True, exist_ok=True)
+        self.sessions_dir.mkdir(parents=True, exist_ok=True)
         self._runs: dict[str, RunRecord] = {}
+        self._sessions: dict[str, dict[str, Any]] = {}
         self._lock = threading.Lock()
+        self._persist_lock = threading.Lock()
+        self._restore_sessions()
+        self._restore_runs()
+
+    def _session_path(self, session_id: str) -> Path:
+        return self.sessions_dir / f"{session_id}.json"
+
+    def _persist_session(self, session: dict[str, Any]) -> None:
+        path = self._session_path(session["session_id"])
+        temporary = path.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps(session), encoding="utf-8")
+        temporary.replace(path)
+
+    def _restore_sessions(self, *, only_missing: bool = False) -> None:
+        for path in sorted(self.sessions_dir.glob("session-*.json")):
+            try:
+                session = json.loads(path.read_text(encoding="utf-8"))
+                session_id = session.get("session_id") if isinstance(session, dict) else None
+                if (
+                    isinstance(session_id, str)
+                    and _SESSION_ID_RE.fullmatch(session_id)
+                    and path.stem == session_id
+                ):
+                    if only_missing:
+                        with self._lock:
+                            if session_id in self._sessions:
+                                continue
+                    session["title"] = str(session.get("title") or "Network investigation")[:120]
+                    now = datetime.now(timezone.utc).isoformat()
+                    for timestamp_key in ("created_at", "updated_at"):
+                        try:
+                            datetime.fromisoformat(session.get(timestamp_key, ""))
+                        except (TypeError, ValueError):
+                            session[timestamp_key] = now
+                    session["run_ids"] = [
+                        run_id for run_id in session.get("run_ids", [])
+                        if isinstance(run_id, str) and _RUN_ID_RE.fullmatch(run_id)
+                    ] if isinstance(session.get("run_ids", []), list) else []
+                    history = session.get("assistant_history", [])
+                    session["assistant_history"] = [
+                        {"role": turn["role"], "content": turn["content"][:4000]}
+                        for turn in history[-40:]
+                        if isinstance(turn, dict)
+                        and turn.get("role") in {"user", "assistant"}
+                        and isinstance(turn.get("content"), str)
+                    ] if isinstance(history, list) else []
+                    if not isinstance(session.get("current_run_id"), str):
+                        session["current_run_id"] = None
+                    self._sessions[session_id] = session
+            except Exception:
+                logger.exception("Failed to restore session metadata from %s", path)
+
+    def create_session(self, title: str = "Network investigation") -> SessionSummary:
+        now = datetime.now(timezone.utc)
+        session = {
+            "session_id": f"session-{uuid.uuid4().hex[:12]}",
+            "title": title.strip() or "Network investigation",
+            "created_at": now.isoformat(),
+            "updated_at": now.isoformat(),
+            "current_run_id": None,
+            "run_ids": [],
+            "assistant_history": [],
+        }
+        with self._lock:
+            self._sessions[session["session_id"]] = session
+            self._persist_session(session)
+        return self._session_summary(session)
+
+    @staticmethod
+    def _session_summary(session: dict[str, Any]) -> SessionSummary:
+        return SessionSummary(
+            session_id=session["session_id"],
+            title=session["title"],
+            created_at=session["created_at"],
+            updated_at=session["updated_at"],
+            current_run_id=session.get("current_run_id"),
+            run_count=len(session.get("run_ids", [])),
+        )
+
+    def refresh_external_state(self) -> None:
+        """Import sessions and completed runs created by another local CLI/API process."""
+        self._restore_sessions(only_missing=True)
+        self._restore_runs(only_missing=True)
+        with self._lock:
+            session_ids = list(self._sessions)
+        for session_id in session_ids:
+            path = self._session_path(session_id)
+            try:
+                disk_session = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(disk_session, dict) or disk_session.get("session_id") != session_id:
+                continue
+            with self._lock:
+                current = self._sessions.get(session_id)
+                if current is None:
+                    continue
+                current_ids = current.get("run_ids", []) if isinstance(current.get("run_ids", []), list) else []
+                disk_ids = disk_session.get("run_ids", []) if isinstance(disk_session.get("run_ids", []), list) else []
+                merged_ids = list(dict.fromkeys(
+                    [item for item in current_ids + disk_ids if isinstance(item, str) and _RUN_ID_RE.fullmatch(item)]
+                ))
+                disk_history = disk_session.get("assistant_history", [])
+                safe_history = [
+                    {"role": turn["role"], "content": turn["content"][:4000]}
+                    for turn in disk_history[-40:]
+                    if isinstance(turn, dict)
+                    and turn.get("role") in {"user", "assistant"}
+                    and isinstance(turn.get("content"), str)
+                ] if isinstance(disk_history, list) else current.get("assistant_history", [])
+                disk_current = disk_session.get("current_run_id")
+                current.update({
+                    "title": str(disk_session.get("title") or current.get("title") or "Network investigation")[:120],
+                    "run_ids": merged_ids,
+                    "assistant_history": safe_history,
+                    "current_run_id": disk_current if disk_current in merged_ids else current.get("current_run_id"),
+                    "updated_at": max(
+                        str(current.get("updated_at", "")),
+                        str(disk_session.get("updated_at", "")),
+                    ),
+                })
+
+    def list_sessions(self) -> list[SessionSummary]:
+        self.refresh_external_state()
+        with self._lock:
+            sessions = list(self._sessions.values())
+        return [self._session_summary(s) for s in sorted(sessions, key=lambda s: s["updated_at"], reverse=True)]
+
+    def get_session(self, session_id: str) -> SessionDetail | None:
+        self.refresh_external_state()
+        with self._lock:
+            session = self._sessions.get(session_id)
+            run_ids = list(session.get("run_ids", [])) if session else []
+        if not session:
+            return None
+        runs = [status for run_id in run_ids if (status := self.get_run(run_id)) is not None]
+        summary = self._session_summary(session)
+        return SessionDetail(**summary.model_dump(), runs=runs)
+
+    def get_session_assistant_history(self, session_id: str) -> list[dict[str, str]] | None:
+        self.refresh_external_state()
+        with self._lock:
+            session = self._sessions.get(session_id)
+            return list(session.get("assistant_history", [])) if session else None
+
+    def append_session_assistant_turns(self, session_id: str, question: str, answer: str) -> None:
+        self.refresh_external_state()
+        with self._lock:
+            session = self._sessions.get(session_id)
+            if session is None:
+                return
+            history = session.setdefault("assistant_history", [])
+            history.extend([
+                {"role": "user", "content": question[:2000]},
+                {"role": "assistant", "content": answer[:4000]},
+            ])
+            session["assistant_history"] = history[-40:]
+            session["updated_at"] = datetime.now(timezone.utc).isoformat()
+            self._persist_session(session)
+
+    def clear_session_assistant_history(self, session_id: str) -> bool:
+        self.refresh_external_state()
+        with self._lock:
+            session = self._sessions.get(session_id)
+            if session is None:
+                return False
+            session["assistant_history"] = []
+            session["updated_at"] = datetime.now(timezone.utc).isoformat()
+            self._persist_session(session)
+        return True
+
+    def _attach_run_to_session(self, session_id: str | None, run_id: str) -> str:
+        if session_id is None:
+            session_id = self.create_session().session_id
+        with self._lock:
+            session = self._sessions.get(session_id)
+            if session is None:
+                raise ValueError(f"Session '{session_id}' not found")
+            run_ids = session.setdefault("run_ids", [])
+            if run_id not in run_ids:
+                run_ids.append(run_id)
+            session["current_run_id"] = run_id
+            session["updated_at"] = datetime.now(timezone.utc).isoformat()
+            self._persist_session(session)
+        return session_id
+
+    def _metadata_path(self, run_id: str) -> Path:
+        return self.runs_dir / f"{run_id}.json"
+
+    def _persist_run(self, rec: RunRecord) -> None:
+        # Serialize writers and snapshot mutable run fields while holding the
+        # manager lock. Without this, concurrent chat persistence and worker
+        # completion can race on the same temporary metadata file.
+        with self._persist_lock:
+            with self._lock:
+                metadata = {
+                    "run_id": rec.run_id,
+                    "incident_id": rec.incident_id,
+                    "session_id": rec.session_id,
+                    "scenario_id": rec.scenario_id,
+                    "target_path": str(rec.target_path),
+                    "repository_path": str(rec.repository_path),
+                    "topology_path": str(rec.topology_path) if rec.topology_path else None,
+                    "entity_aliases": rec.entity_aliases,
+                    "status": rec.status,
+                    "created_at": rec.created_at.isoformat(),
+                    "started_at": rec.started_at.isoformat() if rec.started_at else None,
+                    "completed_at": rec.completed_at.isoformat() if rec.completed_at else None,
+                    "error": rec.error,
+                    "assistant_history": list(rec.assistant_history),
+                    "events": [event.model_dump(mode="json") for event in event_sink.get_events(rec.run_id)],
+                }
+            path = self._metadata_path(rec.run_id)
+            temporary = path.with_suffix(".json.tmp")
+            temporary.write_text(json.dumps(metadata), encoding="utf-8")
+            temporary.replace(path)
+
+    def _restore_runs(self, *, only_missing: bool = False) -> None:
+        """Restore run reports and artifact references after a local server restart."""
+        for metadata_path in sorted(self.runs_dir.glob("run-*.json")):
+            try:
+                data = json.loads(metadata_path.read_text(encoding="utf-8"))
+                if not isinstance(data, dict):
+                    raise ValueError("run metadata root must be an object")
+                run_id = data.get("run_id")
+                if (
+                    not isinstance(run_id, str)
+                    or not _RUN_ID_RE.fullmatch(run_id)
+                    or metadata_path.stem != run_id
+                ):
+                    raise ValueError("run metadata contains an invalid run ID")
+                if only_missing:
+                    with self._lock:
+                        if run_id in self._runs:
+                            continue
+                    if data.get("status") in {"queued", "running"}:
+                        continue
+                session_id = data.get("session_id")
+                if not isinstance(session_id, str) or not _SESSION_ID_RE.fullmatch(session_id):
+                    session_id = self.create_session().session_id
+                scenario_id = data.get("scenario_id")
+                scenario_path = self._scenario_path(scenario_id) if isinstance(scenario_id, str) else None
+                if scenario_path is not None:
+                    target_path = scenario_path
+                else:
+                    if scenario_id is not None:
+                        scenario_id = None
+                    try:
+                        target_path = Path(data["target_path"]).resolve()
+                    except (KeyError, TypeError, ValueError):
+                        target_path = self.uploads_dir / "missing-upload"
+                    if not target_path.is_relative_to(self.uploads_dir):
+                        target_path = self.uploads_dir / "missing-upload"
+                repository_path = self.runs_dir / f"{run_id}.sqlite3"
+                topology_raw = data.get("topology_path")
+                try:
+                    topology_path = Path(topology_raw).resolve() if isinstance(topology_raw, str) else None
+                except (OSError, ValueError):
+                    topology_path = None
+                if topology_path:
+                    allowed_topology_roots = [
+                        self.uploads_dir,
+                        Path(__file__).resolve().parents[2] / "config" / "sites",
+                    ]
+                    if not any(topology_path.is_relative_to(root.resolve()) for root in allowed_topology_roots):
+                        topology_path = None
+                rec = RunRecord(
+                    run_id=run_id,
+                    incident_id=data["incident_id"],
+                    scenario_id=scenario_id,
+                    target_path=target_path,
+                    repository_path=repository_path,
+                    session_id=session_id,
+                    topology_path=topology_path,
+                    entity_aliases={
+                        key: value
+                        for key, value in data.get("entity_aliases", {}).items()
+                        if isinstance(key, str) and isinstance(value, str)
+                    } if isinstance(data.get("entity_aliases", {}), dict) else {},
+                )
+                rec.status = data.get("status", "failed")
+                rec.created_at = datetime.fromisoformat(data["created_at"])
+                rec.started_at = datetime.fromisoformat(data["started_at"]) if data.get("started_at") else None
+                rec.completed_at = datetime.fromisoformat(data["completed_at"]) if data.get("completed_at") else None
+                rec.error = data.get("error")
+                history = data.get("assistant_history", [])
+                rec.assistant_history = [
+                    {"role": turn["role"], "content": turn["content"][:4000]}
+                    for turn in history[-40:]
+                    if isinstance(turn, dict)
+                    and turn.get("role") in {"user", "assistant"}
+                    and isinstance(turn.get("content"), str)
+                ] if isinstance(history, list) else []
+
+                if rec.status in {"queued", "running"}:
+                    rec.status = "failed"
+                    rec.completed_at = datetime.now(timezone.utc)
+                    rec.error = "The API restarted before this run completed; start a new run to continue."
+
+                if rec.repository_path.is_file():
+                    try:
+                        repo = SQLiteRepository(rec.repository_path)
+                        rec.repository = repo
+                        rec.observations = repo.get_observations(rec.incident_id)
+                        if rec.observations:
+                            rec.features = FeaturePipeline().extract_features(
+                                rec.observations, incident_id=rec.incident_id
+                            )
+                        rec.report = repo.get_final_report(rec.incident_id)
+                        rec.tower_reports = {
+                            report.tower_id: report for report in repo.get_tower_reports(rec.incident_id)
+                        }
+                        rec.gate_result = repo.get_gate_result(rec.incident_id)
+                    except Exception as exc:
+                        logger.exception("Could not restore SQLite artifacts for run %s", rec.run_id)
+                        rec.status = "failed"
+                        rec.completed_at = rec.completed_at or datetime.now(timezone.utc)
+                        rec.error = f"Saved run artifacts could not be restored: {exc}"
+                if rec.status == "completed" and rec.report is None:
+                    rec.status = "failed"
+                    rec.error = "Saved report artifacts are missing; rerun this investigation."
+                    rec.completed_at = rec.completed_at or datetime.now(timezone.utc)
+
+                with self._lock:
+                    self._runs[rec.run_id] = rec
+                # Rehydration must not make an arbitrary filename-sorted run the
+                # session's current run or make old sessions appear recently used.
+                with self._lock:
+                    session = self._sessions.get(rec.session_id)
+                    if session is None:
+                        session = {
+                            "session_id": rec.session_id,
+                            "title": "Network investigation",
+                            "created_at": rec.created_at.isoformat(),
+                            "updated_at": rec.created_at.isoformat(),
+                            "current_run_id": None,
+                            "run_ids": [rec.run_id],
+                        }
+                        self._sessions[rec.session_id] = session
+                    else:
+                        session.setdefault("run_ids", [])
+                        if rec.run_id not in session["run_ids"]:
+                            session["run_ids"].append(rec.run_id)
+                        if not session.get("current_run_id"):
+                            session["current_run_id"] = rec.run_id
+                    self._persist_session(session)
+                try:
+                    events = [ExecutionEventModel.model_validate(event) for event in data.get("events", [])]
+                except Exception as exc:
+                    logger.exception("Could not restore execution events for run %s", rec.run_id)
+                    events = []
+                    rec.error = rec.error or f"Saved event history could not be restored: {exc}"
+                event_sink.restore_run(
+                    rec.run_id,
+                    events,
+                    closed=rec.status in {"completed", "failed"},
+                    status=rec.status,
+                )
+                self._persist_run(rec)
+            except Exception:
+                logger.exception("Failed to restore API run metadata from %s", metadata_path)
+
+        # Repair a stale current pointer only when its target is absent. Existing
+        # pointers remain authoritative so restoring history is side-effect free.
+        with self._lock:
+            restored_runs = dict(self._runs)
+            sessions = list(self._sessions.values())
+        for session in sessions:
+            with self._lock:
+                session_id = session["session_id"]
+                original_ids = session.get("run_ids", [])
+                valid_ids = [
+                    run_id for run_id in original_ids
+                    if (
+                        run_id in restored_runs and restored_runs[run_id].session_id == session_id
+                    ) or (only_missing and self._metadata_path(run_id).is_file())
+                ]
+                changed = valid_ids != original_ids
+                session["run_ids"] = valid_ids
+                current_id = session.get("current_run_id")
+                if current_id not in valid_ids:
+                    candidates = [restored_runs[run_id] for run_id in valid_ids]
+                    if candidates:
+                        latest = max(candidates, key=lambda item: item.created_at)
+                        session["current_run_id"] = latest.run_id
+                    else:
+                        session["current_run_id"] = None
+                    changed = True
+                if changed:
+                    self._persist_session(session)
+
+    def _scenario_path(self, scenario_id: str) -> Path | None:
+        """Resolve a catalog scenario without permitting paths outside the catalog."""
+        candidate = (self.scenarios_dir / scenario_id).resolve()
+        if not candidate.is_relative_to(self.scenarios_dir):
+            return None
+        if not candidate.is_dir() or not (candidate / "telemetry.jsonl").is_file():
+            return None
+        return candidate
 
     def list_scenarios(self) -> list[ScenarioSummary]:
         results: list[ScenarioSummary] = []
@@ -131,26 +569,27 @@ class RunManager:
             return results
 
         for p in sorted(self.scenarios_dir.iterdir()):
-            if p.is_dir() and (p / "telemetry.jsonl").exists():
-                meta = SCENARIO_CATALOG_META.get(p.name, {
-                    "name": p.name.replace("_", " ").title(),
+            scenario_path = self._scenario_path(p.name)
+            if scenario_path is not None:
+                meta = SCENARIO_CATALOG_META.get(scenario_path.name, {
+                    "name": scenario_path.name.replace("_", " ").title(),
                     "category": "Synthetic",
-                    "description": f"Synthetic scenario for {p.name}",
+                    "description": f"Synthetic scenario for {scenario_path.name}",
                     "symptoms": "Network telemetry anomaly capture",
                 })
                 results.append(ScenarioSummary(
-                    scenario_id=p.name,
+                    scenario_id=scenario_path.name,
                     name=meta["name"],
                     category=meta["category"],
                     description=meta["description"],
-                    fixture_path=str(p),
+                    fixture_path=str(scenario_path),
                     symptoms_summary=meta["symptoms"],
                 ))
         return results
 
     def get_scenario(self, scenario_id: str) -> ScenarioDetail | None:
-        scenario_path = self.scenarios_dir / scenario_id
-        if not scenario_path.is_dir():
+        scenario_path = self._scenario_path(scenario_id)
+        if scenario_path is None:
             return None
 
         meta = SCENARIO_CATALOG_META.get(scenario_id, {
@@ -186,8 +625,8 @@ class RunManager:
         )
 
     def get_scenario_topology(self, scenario_id: str) -> TopologyGraph | None:
-        scenario_path = self.scenarios_dir / scenario_id
-        if not scenario_path.is_dir():
+        scenario_path = self._scenario_path(scenario_id)
+        if scenario_path is None:
             return None
 
         topo_file = scenario_path / "topology.json"
@@ -231,35 +670,243 @@ class RunManager:
 
     def create_run(self, req: RunCreateRequest) -> RunStatusResponse:
         run_id = f"run-{uuid.uuid4().hex[:10]}"
+        if not req.scenario_id:
+            raise ValueError("scenario_id is required; use the upload endpoint for custom captures")
+        scenario_path = self._scenario_path(req.scenario_id)
+        if scenario_path is None:
+            raise ValueError(f"Scenario '{req.scenario_id}' not found in {self.scenarios_dir}")
+        incident_id = req.incident_id or f"INC-{req.scenario_id}-{uuid.uuid4().hex[:6]}"
+        return self._start_run(
+            run_id=run_id,
+            target_path=scenario_path,
+            scenario_id=req.scenario_id,
+            incident_id=incident_id,
+            llm=req.llm,
+            symptom_chat=req.symptom_chat,
+            site=req.site,
+            session_id=req.session_id,
+        )
 
-        if req.scenario_id:
-            scenario_path = self.scenarios_dir / req.scenario_id
-            if not scenario_path.is_dir():
-                raise ValueError(f"Scenario '{req.scenario_id}' not found in {self.scenarios_dir}")
-            target_path = scenario_path
-        elif req.target_path:
-            target_path = Path(req.target_path)
-            if not target_path.exists():
-                raise ValueError(f"Target path '{req.target_path}' does not exist")
+    def create_uploaded_run(self, req: UploadRunRequest) -> RunStatusResponse:
+        telemetry_suffix = Path(req.telemetry_filename).suffix.lower()
+        if telemetry_suffix not in {".json", ".jsonl", ".csv", ".log"}:
+            raise ValueError("Telemetry must be a .json, .jsonl, .csv, or .log file")
+        if (req.topology_filename is None) != (req.topology_content is None):
+            raise ValueError("topology_filename and topology_content must be provided together")
+        if req.topology_filename and Path(req.topology_filename).suffix.lower() != ".json":
+            raise ValueError("Topology must be a .json file")
+        if req.topology_content is not None:
+            try:
+                topology = json.loads(req.topology_content)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"Topology file is not valid JSON: {exc.msg}") from exc
+            if not isinstance(topology, dict):
+                raise ValueError("Topology JSON must contain an object")
+
+        upload_id = uuid.uuid4().hex
+        target_path = self.uploads_dir / upload_id
+        target_path.mkdir(parents=True, exist_ok=False)
+        telemetry_path = target_path / f"telemetry{telemetry_suffix}"
+        try:
+            telemetry_path.write_text(req.telemetry_content, encoding="utf-8")
+            if req.topology_content is not None:
+                (target_path / "topology.json").write_text(req.topology_content, encoding="utf-8")
+        except Exception:
+            import shutil
+
+            shutil.rmtree(target_path, ignore_errors=True)
+            raise
+
+        run_id = f"run-{uuid.uuid4().hex[:10]}"
+        incident_id = req.incident_id or f"INC-UPLOAD-{uuid.uuid4().hex[:6]}"
+        try:
+            return self._start_run(
+                run_id=run_id,
+                target_path=target_path,
+                scenario_id=None,
+                incident_id=incident_id,
+                llm=req.llm,
+                symptom_chat=req.symptom_chat,
+                site=req.site,
+                session_id=req.session_id,
+            )
+        except Exception:
+            import shutil
+
+            shutil.rmtree(target_path, ignore_errors=True)
+            raise
+
+    def create_cli_run(
+        self,
+        *,
+        session_id: str,
+        incident_id: str,
+        input_path: Path,
+        topology_path: Path | None = None,
+        entity_aliases: dict[str, str] | None = None,
+    ) -> RunRecord:
+        """Reserve a session run for CLI diagnosis; persistence occurs after completion."""
+        self.refresh_external_state()
+        scenario_id = None
+        candidate = self._scenario_path(input_path.name)
+        if candidate is not None and candidate == input_path.resolve():
+            scenario_id = input_path.name
+
+        if scenario_id:
+            stored_target = candidate
+            stored_topology = None
         else:
-            raise ValueError("Either scenario_id or target_path must be provided")
+            stored_target = self.uploads_dir / f"cli-{uuid.uuid4().hex}"
+            stored_target.mkdir(parents=True, exist_ok=False)
+            stored_topology = stored_target / "topology.json"
+            source_topology = topology_path or (
+                input_path / "topology.json" if input_path.is_dir() else None
+            )
+            if source_topology and source_topology.is_file():
+                import shutil
 
-        incident_id = req.incident_id or f"INC-{req.scenario_id or 'CUSTOM'}-{uuid.uuid4().hex[:6]}"
+                shutil.copyfile(source_topology, stored_topology)
+            else:
+                stored_topology = None
+
+        run_id = f"run-{uuid.uuid4().hex[:10]}"
+        session_id = self._attach_run_to_session(session_id, run_id)
+        record = RunRecord(
+            run_id=run_id,
+            incident_id=incident_id,
+            scenario_id=scenario_id,
+            target_path=stored_target,
+            repository_path=self.runs_dir / f"{run_id}.sqlite3",
+            session_id=session_id,
+            topology_path=stored_topology,
+            entity_aliases=entity_aliases or {},
+        )
+        record.status = "running"
+        record.started_at = record.created_at
+        with self._lock:
+            self._runs[run_id] = record
+        self._persist_run(record)
+        return record
+
+    def complete_cli_run(
+        self,
+        run_id: str,
+        *,
+        report: FinalReport,
+        observations: list[CanonicalObservation],
+        source_repository: SQLiteRepository,
+    ) -> None:
+        """Publish a CLI diagnosis as a normal persisted session run for the dashboard."""
+        with self._lock:
+            record = self._runs.get(run_id)
+        if record is None:
+            raise ValueError(f"CLI run '{run_id}' was not registered")
+
+        stored_repository = SQLiteRepository(record.repository_path)
+        if source_repository.db_path != stored_repository.db_path:
+            stored_repository.record_incident(record.incident_id, status="completed")
+            for observation in observations:
+                stored_repository.insert_observation(observation)
+            for tower_report in source_repository.get_tower_reports(record.incident_id):
+                stored_repository.insert_tower_report(tower_report)
+            gate_result = source_repository.get_gate_result(record.incident_id)
+            if gate_result is not None:
+                stored_repository.insert_gate_result(record.incident_id, gate_result)
+            for task in source_repository.get_tasks(record.incident_id):
+                stored_repository.insert_task(task)
+            for proposal in source_repository.get_supervisor_proposals(record.incident_id):
+                stored_repository.insert_supervisor_proposal(proposal)
+
+        stored_repository.insert_final_report(report)
+        now = datetime.now(timezone.utc)
+        with self._lock:
+            record.repository = stored_repository
+            record.observations = stored_repository.get_observations(record.incident_id)
+            record.features = FeaturePipeline().extract_features(
+                record.observations, incident_id=record.incident_id
+            )
+            record.report = report
+            record.tower_reports = {
+                item.tower_id: item
+                for item in stored_repository.get_tower_reports(record.incident_id)
+            }
+            record.gate_result = stored_repository.get_gate_result(record.incident_id)
+            record.status = "completed"
+            record.completed_at = now
+
+        event_sink.restore_run(
+            run_id,
+            [
+                ExecutionEventModel(
+                    event_id=str(uuid.uuid4()),
+                    run_id=run_id,
+                    incident_id=record.incident_id,
+                    timestamp=record.started_at or record.created_at,
+                    event_type="run.started",
+                    source_component="cli",
+                    status="completed",
+                    payload={"source": "CLI"},
+                ),
+                ExecutionEventModel(
+                    event_id=str(uuid.uuid4()),
+                    run_id=run_id,
+                    incident_id=record.incident_id,
+                    timestamp=now,
+                    event_type="run.completed",
+                    source_component="cli",
+                    status="completed",
+                    payload={"source": "CLI", "report_status": report.status},
+                ),
+            ],
+            closed=True,
+            status="completed",
+        )
+        self._attach_run_to_session(record.session_id, run_id)
+        self._persist_run(record)
+
+    def fail_cli_run(self, run_id: str, error: str) -> None:
+        with self._lock:
+            record = self._runs.get(run_id)
+            if record is None:
+                return
+            record.status = "failed"
+            record.error = error[:2000]
+            record.completed_at = datetime.now(timezone.utc)
+        event_sink.close_run(run_id, status="failed")
+        self._persist_run(record)
+
+    def _start_run(
+        self,
+        *,
+        run_id: str,
+        target_path: Path,
+        scenario_id: str | None,
+        incident_id: str,
+        llm: str,
+        symptom_chat: str | None,
+        site: str | None,
+        session_id: str | None,
+    ) -> RunStatusResponse:
+
+        session_id = self._attach_run_to_session(session_id, run_id)
 
         record = RunRecord(
             run_id=run_id,
             incident_id=incident_id,
-            scenario_id=req.scenario_id,
+            scenario_id=scenario_id,
             target_path=target_path,
+            repository_path=self.runs_dir / f"{run_id}.sqlite3",
+            session_id=session_id,
         )
 
         with self._lock:
             self._runs[run_id] = record
+        self._persist_run(record)
 
         # Start execution in background thread
         thread = threading.Thread(
             target=self._execute_run_worker,
-            args=(run_id, req.llm, req.symptom, req.site),
+            args=(run_id, llm, symptom_chat, site),
             daemon=True,
         )
         thread.start()
@@ -267,7 +914,8 @@ class RunManager:
         return RunStatusResponse(
             run_id=run_id,
             incident_id=incident_id,
-            scenario_id=req.scenario_id,
+            session_id=session_id,
+            scenario_id=scenario_id,
             status="queued",
             created_at=record.created_at,
         )
@@ -280,6 +928,7 @@ class RunManager:
             return RunStatusResponse(
                 run_id=rec.run_id,
                 incident_id=rec.incident_id,
+                session_id=rec.session_id,
                 scenario_id=rec.scenario_id,
                 status=rec.status,
                 created_at=rec.created_at,
@@ -287,6 +936,39 @@ class RunManager:
                 completed_at=rec.completed_at,
                 error=rec.error,
             )
+
+    def list_runs(self) -> list[RunStatusResponse]:
+        with self._lock:
+            run_ids = list(self._runs)
+        runs = [status for run_id in run_ids if (status := self.get_run(run_id)) is not None]
+        return sorted(runs, key=lambda status: status.created_at, reverse=True)
+
+    def get_assistant_history(self, run_id: str) -> list[dict[str, str]] | None:
+        with self._lock:
+            rec = self._runs.get(run_id)
+            return list(rec.assistant_history) if rec else None
+
+    def append_assistant_turns(self, run_id: str, question: str, answer: str) -> None:
+        with self._lock:
+            rec = self._runs.get(run_id)
+            if rec is None:
+                return
+            rec.assistant_history.extend([
+                {"role": "user", "content": question},
+                {"role": "assistant", "content": answer},
+            ])
+            # Keep a bounded durable transcript; each model call also receives only its latest turns.
+            rec.assistant_history = rec.assistant_history[-40:]
+        self._persist_run(rec)
+
+    def clear_assistant_history(self, run_id: str) -> bool:
+        with self._lock:
+            rec = self._runs.get(run_id)
+            if rec is None:
+                return False
+            rec.assistant_history.clear()
+        self._persist_run(rec)
+        return True
 
     def get_run_telemetry(self, run_id: str) -> TelemetryResponse | None:
         with self._lock:
@@ -379,30 +1061,61 @@ class RunManager:
             graph = self.get_scenario_topology(rec.scenario_id)
 
         if not graph:
-            # Fallback: extract from topology observations
-            nodes_dict: dict[str, TopologyNode] = {}
-            links_list: list[TopologyLink] = []
-            for obs in rec.observations:
-                if isinstance(obs, TopologyObservation):
-                    if obs.source_entity not in nodes_dict:
-                        nodes_dict[obs.source_entity] = TopologyNode(
-                            id=obs.source_entity, name=obs.source_entity, role="device"
-                        )
-                    if obs.target_entity not in nodes_dict:
-                        nodes_dict[obs.target_entity] = TopologyNode(
-                            id=obs.target_entity, name=obs.target_entity, role="device"
-                        )
-                    links_list.append(TopologyLink(
+            graph = TopologyGraph(
+                topology_id=rec.incident_id,
+            )
+
+        # Keep telemetry entities visible even when a supplied map is partial,
+        # and preserve explicitly declared isolated nodes that cannot be
+        # represented as link observations.
+        node_ids = {node.id for node in graph.nodes}
+        link_ids = {link.id for link in graph.links}
+        for obs in rec.observations:
+            entity_id = getattr(obs, "entity_id", None)
+            if entity_id and entity_id not in node_ids:
+                graph.nodes.append(TopologyNode(id=entity_id, name=entity_id, role="device"))
+                node_ids.add(entity_id)
+            if isinstance(obs, TopologyObservation):
+                for endpoint in (obs.source_entity, obs.target_entity):
+                    if endpoint not in node_ids:
+                        graph.nodes.append(TopologyNode(id=endpoint, name=endpoint, role="device"))
+                        node_ids.add(endpoint)
+                if obs.observation_id not in link_ids:
+                    graph.links.append(TopologyLink(
                         id=obs.observation_id,
                         source=obs.source_entity,
                         target=obs.target_entity,
                         relationship=obs.relationship_type,
                     ))
-            graph = TopologyGraph(
-                topology_id=rec.incident_id,
-                nodes=list(nodes_dict.values()),
-                links=links_list,
-            )
+                    link_ids.add(obs.observation_id)
+
+        if rec.target_path.is_dir():
+            topology_path = rec.topology_path or (rec.target_path / "topology.json")
+            try:
+                topology_data = json.loads(topology_path.read_text(encoding="utf-8"))
+                for item in topology_data.get("nodes", []):
+                    if not isinstance(item, dict):
+                        continue
+                    entity_id = item.get("entity_id") or item.get("id")
+                    if not isinstance(entity_id, str) or not entity_id.strip():
+                        continue
+                    entity_id = rec.entity_aliases.get(entity_id.strip().upper(), entity_id.strip())
+                    if entity_id in node_ids:
+                        continue
+                    name = item.get("name")
+                    role = item.get("role")
+                    node_type = item.get("entity_type") or item.get("type")
+                    graph.nodes.append(TopologyNode(
+                        id=entity_id,
+                        name=name if isinstance(name, str) and name else entity_id,
+                        role=role if isinstance(role, str) and role else "device",
+                        type=node_type if isinstance(node_type, str) and node_type else "device",
+                    ))
+                    node_ids.add(entity_id)
+            except (OSError, json.JSONDecodeError, AttributeError, TypeError):
+                # The ingestion path reports malformed map data as a warning;
+                # topology display should still show telemetry-derived nodes.
+                pass
 
         # Annotate nodes based on final report if completed
         if rec.report:
@@ -415,7 +1128,8 @@ class RunManager:
                     node.status = "symptom"
                 elif node.id in inferred_entities:
                     node.status = "impacted"
-                if node.id.upper() in root_cause_text:
+                escaped_id = re.escape(node.id.upper())
+                if re.search(rf"(?<![A-Z0-9]){escaped_id}(?![A-Z0-9])", root_cause_text):
                     node.status = "probable_root_cause"
 
         return graph
@@ -586,7 +1300,7 @@ class RunManager:
         self,
         run_id: str,
         llm_mode: str = "off",
-        symptom: str | None = None,
+        symptom_chat: str | None = None,
         site: str | None = None,
     ) -> None:
         """Background thread executing diagnosis and emitting structured events."""
@@ -594,6 +1308,7 @@ class RunManager:
             rec = self._runs[run_id]
             rec.status = "running"
             rec.started_at = datetime.now(timezone.utc)
+        self._persist_run(rec)
 
         def emit(event_type: str, component: str, status: str = "info", payload: dict[str, Any] | None = None, entity_refs: list[str] | None = None, evidence_refs: list[str] | None = None):
             event = ExecutionEventModel(
@@ -615,12 +1330,43 @@ class RunManager:
 
             # 1. Ingestion
             data_quality_warnings: list[str] = []
+            project_root = Path(__file__).resolve().parents[2]
+            network_profile = None
+            topology_path = None
+            if site:
+                profile_candidates = [
+                    project_root / "config" / "profiles" / f"{site}.yaml",
+                    project_root / "config" / "profiles" / f"{site}.yml",
+                ]
+                profile_file = next((path for path in profile_candidates if path.is_file()), None)
+                if profile_file:
+                    network_profile = NetworkProfile.load(profile_file)
+                    rec.entity_aliases = network_profile.aliases()
+                else:
+                    data_quality_warnings.append(
+                        f"No profile registered for site {site}; using generic mappings. "
+                        "Create a matching config/profiles profile to apply site-specific mappings."
+                    )
+                site_topology = project_root / "config" / "sites" / site / "topology.json"
+                if site_topology.is_file() and not (rec.target_path / "topology.json").is_file():
+                    topology_path = site_topology
+            rec.topology_path = topology_path
+            self._persist_run(rec)
+
             inc_id, observations = _load_observations_from_target(
                 rec.target_path,
                 incident_id=rec.incident_id,
                 data_quality_warnings=data_quality_warnings,
+                profile=network_profile,
+                topology_path=topology_path,
             )
+            rec.incident_id = inc_id
             rec.observations = observations
+            if network_profile and network_profile.topology_completeness != "complete":
+                data_quality_warnings.append(
+                    f"Profile {network_profile.profile_id} marks topology "
+                    f"{network_profile.topology_completeness}; missing links are not treated as proof of an outage."
+                )
 
             emit("ingestion.completed", "ingestion", "completed", {
                 "observation_count": len(observations),
@@ -634,11 +1380,14 @@ class RunManager:
             emit("features.computed", "feature_pipeline", "completed", {"features_count": len(features)})
 
             # 3. Setup SQLite repository
-            repo = SQLiteRepository(":memory:")
+            repo = SQLiteRepository(rec.repository_path)
             rec.repository = repo
 
             # 4. Supervisor Runtime
-            fabric = IntegrationFabric(repository=repo, rules=load_rules())
+            rules = load_rules()
+            if network_profile:
+                rules = network_profile.apply_to_rules(rules)
+            fabric = IntegrationFabric(repository=repo, rules=rules)
             gate = EvidenceReleaseGate(repository=repo)
             rca_agent = SupervisoryRCAAgent(llm_mode=llm_mode)
 
@@ -650,6 +1399,10 @@ class RunManager:
                 repository=repo,
                 rca_agent=rca_agent,
                 gate=gate,
+                network_profile=(
+                    {"profile_id": network_profile.profile_id, "version": network_profile.version}
+                    if network_profile else None
+                ),
                 explain=explain_callback,
             )
 
@@ -659,25 +1412,49 @@ class RunManager:
             report = runtime.run_incident(
                 inc_id,
                 observations,
-                symptom=symptom or "",
                 data_quality_warnings=data_quality_warnings,
             )
-            rec.report = report
             rec.tower_reports = {tr.tower_id: tr for tr in repo.get_tower_reports(inc_id)}
             rec.gate_result = repo.get_gate_result(inc_id)
 
-            # Emit tower completion events
-            for tower_id, tr in rec.tower_reports.items():
+            for tower_id, tower_report in rec.tower_reports.items():
                 emit("tower.completed", tower_id.value, "completed", {
-                    "findings_count": len(tr.findings),
-                    "hypotheses_count": len(tr.hypotheses),
-                }, entity_refs=[e for f in tr.findings for e in f.entity_refs])
+                    "findings_count": len(tower_report.findings),
+                    "hypotheses_count": len(tower_report.hypotheses),
+                }, entity_refs=[entity for finding in tower_report.findings for entity in finding.entity_refs])
 
             gate_outcome = rec.gate_result.outcome.value if rec.gate_result else "UNKNOWN"
             emit("gate.check.completed", "evidence_gate", "completed", {
                 "gate_outcome": gate_outcome,
                 "passed": "PASS" in gate_outcome,
             })
+
+            if site is not None:
+                report = report.model_copy(update={"site_id": site})
+                repo.insert_final_report(report)
+            if symptom_chat is not None:
+                emit(
+                    "symptom_review.started",
+                    "symptom_agent",
+                    "running",
+                    {"decision_loop_participant": False},
+                )
+                symptom_addendum = SymptomReasoningAgent(llm_mode=llm_mode).analyze(
+                    symptom=symptom_chat,
+                    report=report,
+                    observations=observations,
+                    tower_reports=list(rec.tower_reports.values())
+                    or repo.get_tower_reports(inc_id),
+                )
+                report = report.model_copy(update={"symptom_reasoning": symptom_addendum})
+                repo.insert_final_report(report)
+                emit(
+                    "symptom_review.completed",
+                    "symptom_agent",
+                    "completed",
+                    {"status": symptom_addendum.status, "agent_mode": symptom_addendum.agent_mode},
+                )
+            rec.report = report
 
             emit("report.published", "supervisor", "completed", {
                 "status": report.status,
@@ -700,7 +1477,8 @@ class RunManager:
                 rec.error = str(exc)
             emit("run.failed", "runner", "error", {"error": str(exc)})
         finally:
-            event_sink.close_run(run_id)
+            event_sink.close_run(run_id, status=rec.status)
+            self._persist_run(rec)
 
 
 # Global singleton run manager

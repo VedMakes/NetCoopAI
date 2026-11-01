@@ -18,6 +18,7 @@ from netcoop_api.schemas import (
     TelemetryResponse,
     TopologyGraph,
     TowerReportSummary,
+    UploadRunRequest,
 )
 from netcoop_api.service import run_manager
 
@@ -26,9 +27,24 @@ router = APIRouter(prefix="/api/runs", tags=["Runs"])
 
 @router.post("", response_model=RunStatusResponse, status_code=201)
 def create_run(req: RunCreateRequest) -> RunStatusResponse:
-    """Starts a new diagnostic run on a scenario or target capture path."""
+    """Starts a new diagnostic run on a packaged scenario."""
     try:
         return run_manager.create_run(req)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.get("", response_model=list[RunStatusResponse])
+def list_runs() -> list[RunStatusResponse]:
+    """Returns recent local runs, including those restored after a restart."""
+    return run_manager.list_runs()
+
+
+@router.post("/upload", response_model=RunStatusResponse, status_code=201)
+def create_uploaded_run(req: UploadRunRequest) -> RunStatusResponse:
+    """Starts a run from bounded telemetry text and an optional JSON topology map."""
+    try:
+        return run_manager.create_uploaded_run(req)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 

@@ -1,9 +1,11 @@
 import {
   AssistantResponse,
+  AssistantTurn,
   DiagnosticTask,
   EvaluationResponse,
   ExecutionEvent,
   FinalReport,
+  InvestigationSession,
   GateResultDetail,
   RunCreateRequest,
   RunStatusResponse,
@@ -12,6 +14,7 @@ import {
   TelemetryResponse,
   TopologyGraph,
   TowerReportSummary,
+  UploadRunRequest,
 } from './types';
 
 const API_BASE = '/api';
@@ -25,6 +28,28 @@ export async function getHealth(): Promise<{ status: string; components: Record<
 export async function getScenarios(): Promise<ScenarioSummary[]> {
   const res = await fetch(`${API_BASE}/scenarios`);
   if (!res.ok) throw new Error(`Failed to load scenarios: ${res.statusText}`);
+  return res.json();
+}
+
+export async function getSessions(): Promise<InvestigationSession[]> {
+  const res = await fetch(`${API_BASE}/sessions`);
+  if (!res.ok) throw new Error(`Failed to load sessions: ${res.statusText}`);
+  return res.json();
+}
+
+export async function createSession(title = 'Network investigation'): Promise<InvestigationSession> {
+  const res = await fetch(`${API_BASE}/sessions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title }),
+  });
+  if (!res.ok) throw new Error(`Failed to create session: ${res.statusText}`);
+  return res.json();
+}
+
+export async function getSession(sessionId: string): Promise<InvestigationSession> {
+  const res = await fetch(`${API_BASE}/sessions/${encodeURIComponent(sessionId)}`);
+  if (!res.ok) throw new Error(`Failed to load session: ${res.statusText}`);
   return res.json();
 }
 
@@ -49,6 +74,19 @@ export async function createRun(request: RunCreateRequest): Promise<RunStatusRes
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }));
     throw new Error(err.detail || 'Failed to start run');
+  }
+  return res.json();
+}
+
+export async function createUploadedRun(request: UploadRunRequest): Promise<RunStatusResponse> {
+  const res = await fetch(`${API_BASE}/runs/upload`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(request),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(err.detail || 'Failed to upload capture');
   }
   return res.json();
 }
@@ -119,17 +157,59 @@ export async function getRunEvaluation(runId: string): Promise<EvaluationRespons
 export async function askAssistant(
   runId: string,
   question: string,
-  history: Array<{ role: 'user' | 'assistant'; content: string }> = [],
   llm: 'off' | 'auto' | 'on' = 'off'
 ): Promise<AssistantResponse> {
   const res = await fetch(`${API_BASE}/runs/${runId}/assistant`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ question, history, llm }),
+    body: JSON.stringify({ question, llm }),
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }));
     throw new Error(err.detail || 'Assistant request failed');
   }
   return res.json();
+}
+
+export async function getAssistantHistory(runId: string): Promise<AssistantTurn[]> {
+  const res = await fetch(`${API_BASE}/runs/${encodeURIComponent(runId)}/assistant/history`);
+  if (!res.ok) throw new Error(`Failed to load assistant history: ${res.statusText}`);
+  return res.json();
+}
+
+export async function clearAssistantHistory(runId: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/runs/${encodeURIComponent(runId)}/assistant/history`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) throw new Error(`Failed to clear assistant history: ${res.statusText}`);
+}
+
+export async function askSessionAssistant(
+  sessionId: string,
+  question: string,
+  llm: 'off' | 'auto' | 'on' = 'off'
+): Promise<AssistantResponse> {
+  const res = await fetch(`${API_BASE}/sessions/${encodeURIComponent(sessionId)}/assistant`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ question, llm }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(err.detail || 'Assistant request failed');
+  }
+  return res.json();
+}
+
+export async function getSessionAssistantHistory(sessionId: string): Promise<AssistantTurn[]> {
+  const res = await fetch(`${API_BASE}/sessions/${encodeURIComponent(sessionId)}/assistant/history`);
+  if (!res.ok) throw new Error(`Failed to load session assistant history: ${res.statusText}`);
+  return res.json();
+}
+
+export async function clearSessionAssistantHistory(sessionId: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/sessions/${encodeURIComponent(sessionId)}/assistant/history`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) throw new Error(`Failed to clear session assistant history: ${res.statusText}`);
 }

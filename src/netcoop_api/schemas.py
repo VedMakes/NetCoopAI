@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class ScenarioSummary(BaseModel):
@@ -47,23 +47,67 @@ class TopologyGraph(BaseModel):
 
 
 class RunCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     scenario_id: str | None = None
-    target_path: str | None = None
-    incident_id: str | None = None
-    llm: str = "off"  # off | auto | on
-    symptom: str | None = None
-    site: str | None = None
+    incident_id: str | None = Field(default=None, max_length=160)
+    session_id: str | None = Field(default=None, max_length=160)
+    llm: Literal["off", "auto", "on"] = "off"
+    symptom_chat: str | None = Field(default=None, max_length=2000)
+    site: str | None = Field(default=None, max_length=120, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+    @field_validator("symptom_chat")
+    @classmethod
+    def symptom_chat_must_contain_text(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("symptom_chat must contain non-whitespace text")
+        return value
+
+
+class UploadRunRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    telemetry_filename: str = Field(min_length=1, max_length=255)
+    telemetry_content: str = Field(min_length=1, max_length=20_000_000)
+    topology_filename: str | None = Field(default=None, max_length=255)
+    topology_content: str | None = Field(default=None, max_length=5_000_000)
+    incident_id: str | None = Field(default=None, max_length=160)
+    session_id: str | None = Field(default=None, max_length=160)
+    llm: Literal["off", "auto", "on"] = "off"
+    symptom_chat: str | None = Field(default=None, max_length=2000)
+    site: str | None = Field(default=None, max_length=120, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+    @field_validator("symptom_chat")
+    @classmethod
+    def symptom_chat_must_contain_text(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("symptom_chat must contain non-whitespace text")
+        return value
 
 
 class RunStatusResponse(BaseModel):
     run_id: str
     incident_id: str
+    session_id: str | None = None
     scenario_id: str | None = None
     status: str = "queued"  # queued | running | completed | failed
     created_at: datetime
     started_at: datetime | None = None
     completed_at: datetime | None = None
     error: str | None = None
+
+
+class SessionSummary(BaseModel):
+    session_id: str
+    title: str
+    created_at: datetime
+    updated_at: datetime
+    current_run_id: str | None = None
+    run_count: int = 0
+
+
+class SessionDetail(SessionSummary):
+    runs: list[RunStatusResponse] = Field(default_factory=list)
 
 
 class ExecutionEventModel(BaseModel):
@@ -165,14 +209,15 @@ class EvaluationResponse(BaseModel):
 
 
 class AssistantTurn(BaseModel):
-    role: str  # user | assistant
-    content: str
+    role: Literal["user", "assistant"]
+    content: str = Field(max_length=4000)
 
 
 class AssistantRequest(BaseModel):
-    question: str
-    history: list[AssistantTurn] = Field(default_factory=list)
-    llm: str = "off"  # off | auto | on
+    model_config = ConfigDict(extra="forbid")
+
+    question: str = Field(min_length=1, max_length=2000)
+    llm: Literal["off", "auto", "on"] = "off"
 
 
 class AssistantResponse(BaseModel):

@@ -147,7 +147,7 @@ class TelemetryLoader:
         elif suffix in (".jsonl", ".log"):
             return self.load_jsonl(p, inc_id, default_source)
         else:
-            raise ValueError(f"Unsupported file format '{suffix}'. Supported: .json, .csv, .jsonl")
+            raise ValueError(f"Unsupported file format '{suffix}'. Supported: .json, .csv, .jsonl, .log (JSON Lines)")
 
     # ---------------- JSON Loader ----------------
     def load_json(

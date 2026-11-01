@@ -50,6 +50,7 @@ htmlcov/
 # SQLite temporary/runtime files
 *.db-shm
 *.db-wal
+data/netcoop/
 
 # Editor and OS
 .DS_Store

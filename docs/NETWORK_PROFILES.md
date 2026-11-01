@@ -15,7 +15,7 @@ netcoop triage ./office-capture --site office-east --sitemap ./office-east-topol
 
 `profile-init` drafts mappings for source metric names NetCoop recognizes and lists observed entities. It deliberately leaves entity aliases, DNS/DHCP roles, topology anchors, and topology completeness for operator review. `profile-validate` checks the profile contract and, when given data, reports normalized observation count, whether configured topology anchors and DNS/DHCP roles appeared, and input warnings. Reports retain the profile ID and version.
 
-Capture data is supplied as a local file or directory path. A directory can include `topology.json`, or pass a separate sitemap with `--sitemap`/`--topology`. Site-wide maps may be stored at `config/sites/<site>/topology.json`; `triage --site <site>` loads that map when no explicit sitemap is supplied. A matching `config/profiles/<site>.yaml` applies that site's source mappings and aliases. These paths are local CLI inputs; no web upload service is included.
+CLI capture data is supplied as a local file or directory path. A directory can include `topology.json`, or pass a separate sitemap with `--sitemap`/`--topology`. Site-wide maps may be stored at `config/sites/<site>/topology.json`; `triage --site <site>` loads that map when no explicit sitemap is supplied. A matching `config/profiles/<site>.yaml` applies that site's source mappings and aliases. The browser dashboard also accepts telemetry and a separate topology JSON upload; custom per-site profile selection remains available through the CLI.
 
 For unfamiliar flat JSON/JSONL/CSV records, tell `profile-init` which source keys carry the standard fields. These repeatable options are preserved in the draft and let it inspect names and units before diagnosis:
 

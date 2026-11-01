@@ -1,13 +1,22 @@
 import React, { useEffect, useState } from 'react';
-import { Activity, Cpu, ShieldCheck, MessageSquare, Terminal } from 'lucide-react';
+import { Activity, Cpu, ShieldCheck, MessageSquare, Terminal, Plus, RefreshCw } from 'lucide-react';
 import { getHealth } from '../api';
+import { InvestigationSession, RunStatusResponse } from '../types';
 
 interface HeaderProps {
   activeIncidentId?: string;
-  activeRunId?: string;
+  activeRunId?: string | null;
   isAssistantOpen: boolean;
   onToggleAssistant: () => void;
   hasCertifiedReport: boolean;
+  isLoadingSelection: boolean;
+  activeSessionId: string | null;
+  sessions: InvestigationSession[];
+  onSelectSession: (sessionId: string) => void;
+  onNewSession: () => void;
+  onRefreshSessions: () => void;
+  runs: RunStatusResponse[];
+  onSelectRun: (runId: string) => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -16,6 +25,14 @@ export const Header: React.FC<HeaderProps> = ({
   isAssistantOpen,
   onToggleAssistant,
   hasCertifiedReport,
+  isLoadingSelection,
+  activeSessionId,
+  sessions,
+  onSelectSession,
+  onNewSession,
+  onRefreshSessions,
+  runs,
+  onSelectRun,
 }) => {
   const [healthStatus, setHealthStatus] = useState<'healthy' | 'degraded' | 'offline'>('offline');
   const [componentSummary, setComponentSummary] = useState<string>('Connecting to backend...');
@@ -26,7 +43,7 @@ export const Header: React.FC<HeaderProps> = ({
         const data = await getHealth();
         setHealthStatus(data.status === 'healthy' ? 'healthy' : 'degraded');
         const okCount = Object.values(data.components).filter(c => c.status === 'OK').length;
-        setComponentSummary(`${okCount}/6 Services Online`);
+        setComponentSummary(`${okCount}/${Object.keys(data.components).length} Services Online`);
       } catch {
         setHealthStatus('offline');
         setComponentSummary('API Disconnected');
@@ -96,6 +113,42 @@ export const Header: React.FC<HeaderProps> = ({
 
       {/* Right Controls */}
       <div className="flex items-center space-x-3">
+        <div className="flex items-center gap-1.5">
+          <select
+            aria-label="Investigation session"
+            value={activeSessionId ?? ''}
+            onChange={(event) => onSelectSession(event.target.value)}
+            disabled={isLoadingSelection}
+            className="max-w-36 rounded bg-noc-subpanel border border-noc-border px-2 py-1.5 text-[11px] text-noc-text"
+          >
+            {!activeSessionId && <option value="">Loading session…</option>}
+            {sessions.map((session) => (
+              <option key={session.session_id} value={session.session_id}>
+                {session.title} ({session.run_count})
+              </option>
+            ))}
+          </select>
+          <button onClick={onNewSession} disabled={isLoadingSelection} title="Start a new investigation session" className="rounded bg-noc-subpanel border border-noc-border p-1.5 text-noc-muted hover:text-noc-text disabled:opacity-50">
+            <Plus className="w-4 h-4" />
+          </button>
+          <button onClick={onRefreshSessions} disabled={isLoadingSelection} title="Refresh sessions created in another CLI or dashboard process" className="rounded bg-noc-subpanel border border-noc-border p-1.5 text-noc-muted hover:text-noc-text disabled:opacity-50">
+            <RefreshCw className="w-3.5 h-3.5" />
+          </button>
+          <select
+            aria-label="Investigation run"
+            value={activeRunId ?? ''}
+            onChange={(event) => { if (event.target.value) onSelectRun(event.target.value); }}
+            disabled={isLoadingSelection || runs.length === 0}
+            className="max-w-48 rounded bg-noc-subpanel border border-noc-border px-2 py-1.5 text-[11px] text-noc-text disabled:opacity-50"
+          >
+            {!activeRunId && <option value="">No run selected</option>}
+            {runs.map((run) => (
+              <option key={run.run_id} value={run.run_id}>
+                {(run.scenario_id ?? 'Uploaded capture')} · {run.status} · {run.run_id}
+              </option>
+            ))}
+          </select>
+        </div>
         <div className="hidden sm:flex items-center space-x-1 px-2.5 py-1 rounded bg-noc-subpanel border border-noc-border text-[11px] text-noc-muted font-mono">
           <Cpu className="w-3.5 h-3.5 text-noc-cyan mr-1" />
           <span>Deterministic Offline</span>

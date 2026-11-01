@@ -12,14 +12,19 @@ import {
   Check,
   Info,
 } from 'lucide-react';
-import { askAssistant } from '../api';
-import { AssistantTurn } from '../types';
+import { askSessionAssistant, clearSessionAssistantHistory, getSessionAssistantHistory } from '../api';
+import { AssistantTurn, RunStatusResponse, SymptomReasoning } from '../types';
 
 interface AssistantDrawerProps {
   isOpen: boolean;
   onClose: () => void;
-  runId?: string;
-  hasCertifiedReport: boolean;
+  sessionId: string | null;
+  sessionTitle: string;
+  runs: RunStatusResponse[];
+  hasSessionContext: boolean;
+  latestSymptomReasoning: SymptomReasoning | null;
+  canAddTelemetry: boolean;
+  onRequestAddTelemetry: () => void;
 }
 
 interface EnrichedMessage extends AssistantTurn {
@@ -41,8 +46,13 @@ const PRESET_QUESTIONS = [
 export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
   isOpen,
   onClose,
-  runId,
-  hasCertifiedReport,
+  sessionId,
+  sessionTitle,
+  runs,
+  hasSessionContext,
+  latestSymptomReasoning,
+  canAddTelemetry,
+  onRequestAddTelemetry,
 }) => {
   const [messages, setMessages] = useState<EnrichedMessage[]>([
     {
@@ -55,9 +65,12 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
   const [inputQuestion, setInputQuestion] = useState('');
   const [llmMode, setLlmMode] = useState<'off' | 'auto' | 'on'>('auto');
   const [isLoading, setIsLoading] = useState(false);
+  const [isLoadingHistory, setIsLoadingHistory] = useState(false);
+  const [isClearingHistory, setIsClearingHistory] = useState(false);
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const requestIdRef = useRef(0);
 
   // Auto-scroll to bottom on message update
   useEffect(() => {
@@ -66,17 +79,60 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
     }
   }, [messages, isLoading, isOpen]);
 
-  if (!isOpen) return null;
-
-  const handleClearHistory = () => {
+  useEffect(() => {
+    const requestId = ++requestIdRef.current;
+    setIsLoading(false);
+    setIsClearingHistory(false);
+    setIsLoadingHistory(Boolean(sessionId));
     setMessages([
       {
         role: 'assistant',
-        content:
-          "Conversation reset. You can ask questions about the root cause, supporting observations, or gate checks.",
+        content: sessionId
+          ? `This conversation belongs to “${sessionTitle}”. It can explain completed diagnoses in this session and compare results after a new analysis.`
+          : 'Create or select an investigation session to start.',
         provider: 'deterministic',
       },
     ]);
+    setInputQuestion('');
+    if (sessionId) {
+      getSessionAssistantHistory(sessionId)
+        .then((history) => {
+          if (requestIdRef.current !== requestId || history.length === 0) return;
+          setMessages((current) => [current[0], ...history.map((turn) => ({ ...turn, provider: 'stored' }))]);
+        })
+        .catch((error) => console.warn('Could not restore session conversation:', error))
+        .finally(() => {
+          if (requestIdRef.current === requestId) setIsLoadingHistory(false);
+        });
+    } else {
+      setIsLoadingHistory(false);
+    }
+  }, [sessionId, sessionTitle]);
+
+  if (!isOpen) return null;
+
+  const handleClearHistory = async () => {
+    const requestId = ++requestIdRef.current;
+    setIsLoading(false);
+    if (!sessionId) return;
+    setIsClearingHistory(true);
+    try {
+      await clearSessionAssistantHistory(sessionId);
+      if (requestIdRef.current !== requestId) return;
+      setMessages([
+        {
+          role: 'assistant',
+          content: 'Conversation reset. The completed run reports remain in this session and can still be discussed.',
+          provider: 'deterministic',
+        },
+      ]);
+    } catch (error) {
+      if (requestIdRef.current === requestId) {
+        console.error('Could not clear session conversation:', error);
+      }
+    } finally {
+      if (requestIdRef.current === requestId) setIsClearingHistory(false);
+    }
   };
 
   const handleCopyMessage = (text: string, idx: number) => {
@@ -87,15 +143,15 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
 
   const handleSend = async (questionToSend?: string) => {
     const q = questionToSend || inputQuestion;
-    if (!q.trim() || isLoading) return;
+    if (!q.trim() || isLoading || isLoadingHistory || isClearingHistory) return;
 
-    if (!runId) {
+    if (!sessionId || !hasSessionContext) {
       setMessages((prev) => [
         ...prev,
         { role: 'user', content: q },
         {
           role: 'assistant',
-          content: 'No active incident run selected. Please launch or select a scenario run first.',
+          content: 'Complete a diagnosis in this session before asking questions about its evidence.',
           provider: 'system',
         },
       ]);
@@ -104,13 +160,15 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
     }
 
     const userTurn: EnrichedMessage = { role: 'user', content: q };
-    const historyPayload = messages.map((m) => ({ role: m.role, content: m.content }));
+    const requestedSessionId = sessionId;
+    const requestId = ++requestIdRef.current;
     setMessages((prev) => [...prev, userTurn]);
     setInputQuestion('');
     setIsLoading(true);
 
     try {
-      const resp = await askAssistant(runId, q, historyPayload, llmMode);
+      const resp = await askSessionAssistant(requestedSessionId, q, llmMode);
+      if (requestIdRef.current !== requestId) return;
       setMessages((prev) => [
         ...prev,
         {
@@ -122,6 +180,7 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
         },
       ]);
     } catch (err: any) {
+      if (requestIdRef.current !== requestId) return;
       setMessages((prev) => [
         ...prev,
         {
@@ -131,7 +190,7 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
         },
       ]);
     } finally {
-      setIsLoading(false);
+      if (requestIdRef.current === requestId) setIsLoading(false);
     }
   };
 
@@ -145,19 +204,20 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
           </div>
           <div>
             <h3 className="text-sm font-bold text-noc-text flex items-center gap-2">
-              <span>Incident Explanation Assistant</span>
+              <span>Investigation Assistant</span>
               <span className="text-[10px] px-1.5 py-0.5 rounded font-mono bg-noc-subpanel text-noc-cyan border border-noc-border">
-                Read-Only
+                Session Chat
               </span>
             </h3>
-            <p className="text-[11px] text-noc-muted">Ground-truth isolated • Zero RAG</p>
+            <p className="text-[11px] text-noc-muted truncate max-w-56">{sessionTitle}</p>
           </div>
         </div>
 
         <div className="flex items-center gap-1.5">
           <button
             onClick={handleClearHistory}
-            className="p-1.5 rounded-lg hover:bg-noc-hover text-noc-muted hover:text-noc-text transition-colors"
+            disabled={!sessionId || isClearingHistory || isLoadingHistory}
+            className="p-1.5 rounded-lg hover:bg-noc-hover text-noc-muted hover:text-noc-text transition-colors disabled:opacity-40"
             title="Reset conversation"
           >
             <RotateCcw className="w-4 h-4" />
@@ -171,6 +231,41 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
           </button>
         </div>
       </div>
+
+      <div className="px-5 py-3 border-b border-noc-border/60 bg-noc-bg/40 space-y-2">
+        <div className="flex items-center justify-between gap-3 text-[11px]">
+          <span className="text-noc-muted">
+            Context: {runs.filter((run) => run.status === 'completed').length} completed run(s)
+            {runs.filter((run) => run.status === 'completed').length > 5 ? ' · using 5 most recent' : ''}
+          </span>
+          <button
+            type="button"
+            onClick={onRequestAddTelemetry}
+            disabled={!canAddTelemetry}
+            className="shrink-0 rounded-md border border-noc-amethyst/40 bg-noc-amethyst/10 px-2.5 py-1.5 text-[11px] font-semibold text-noc-amethyst hover:bg-noc-amethyst/20 disabled:cursor-not-allowed disabled:opacity-40"
+            title={canAddTelemetry ? 'Open the explicit upload and new analysis flow' : 'Wait for the current analysis to finish'}
+          >
+            Add telemetry & re-analyze
+          </button>
+        </div>
+        <p className="text-[10px] leading-relaxed text-noc-muted">
+          Uploading starts a separate analysis in this session. The assistant reopens when it finishes. Chat messages are context only; they are never added as telemetry.
+        </p>
+      </div>
+
+      {latestSymptomReasoning && (
+        <div className="mx-4 mt-3 rounded-lg border border-noc-amethyst/30 bg-noc-amethyst/5 p-3 text-xs">
+          <div className="flex items-center justify-between gap-2">
+            <span className="font-semibold text-noc-amethyst">Optional symptom review</span>
+            <span className="rounded border border-noc-border px-1.5 py-0.5 text-[10px] uppercase text-noc-muted">
+              {latestSymptomReasoning.status}
+            </span>
+          </div>
+          <p className="mt-1 text-noc-text">“{latestSymptomReasoning.reported_symptom}”</p>
+          <p className="mt-1 leading-relaxed text-noc-muted">{latestSymptomReasoning.explanation}</p>
+          <p className="mt-1 text-[10px] text-noc-muted">Compared after diagnosis; it did not steer or change the diagnosis.</p>
+        </div>
+      )}
 
       {/* Mode & Environment Bar */}
       <div className="px-5 py-2.5 bg-noc-bg/60 border-b border-noc-border/60 flex items-center justify-between text-xs">
@@ -197,7 +292,7 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
       </div>
 
       {/* Suggested Prompt Pills */}
-      {hasCertifiedReport && messages.length <= 3 && (
+      {hasSessionContext && messages.length <= 3 && (
         <div className="p-4 border-b border-noc-border/50 bg-noc-bg/40 space-y-2">
           <p className="text-[11px] text-noc-muted font-mono flex items-center gap-1">
             <Sparkles className="w-3 h-3 text-noc-cyan" />
@@ -299,10 +394,10 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
           );
         })}
 
-        {isLoading && (
+        {(isLoading || isLoadingHistory) && (
           <div className="flex items-center gap-2 text-xs text-noc-muted font-mono py-2 pl-9">
             <div className="w-2 h-2 rounded-full bg-indigo-500 animate-ping" />
-            <span>Consulting certified incident artifacts...</span>
+            <span>{isLoadingHistory ? 'Restoring session conversation...' : 'Consulting completed session reports...'}</span>
           </div>
         )}
 
@@ -323,16 +418,16 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
             value={inputQuestion}
             onChange={(e) => setInputQuestion(e.target.value)}
             placeholder={
-              runId
-                ? "Ask about root causes, evidence, gate checks, or remediation..."
-                : "Execute a simulation run first..."
+              hasSessionContext
+                ? "Ask about this session's runs, evidence, or symptom..."
+                : "Complete a diagnosis to start session Q&A..."
             }
-            disabled={isLoading || !runId}
+            disabled={isLoading || isLoadingHistory || isClearingHistory || !sessionId || !hasSessionContext}
             className="flex-1 bg-noc-bg border border-noc-border rounded-lg px-3.5 py-2.5 text-xs text-noc-text placeholder-noc-muted focus:outline-none focus:border-indigo-500 disabled:opacity-50"
           />
           <button
             type="submit"
-            disabled={isLoading || !inputQuestion.trim() || !runId}
+            disabled={isLoading || isLoadingHistory || isClearingHistory || !inputQuestion.trim() || !sessionId || !hasSessionContext}
             className="px-3.5 py-2.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-medium transition-colors disabled:opacity-40 flex items-center justify-center cursor-pointer"
           >
             <Send className="w-4 h-4" />
