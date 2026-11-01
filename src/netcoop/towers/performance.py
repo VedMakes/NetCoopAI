@@ -280,46 +280,27 @@ class PerformanceEngine:
             )
 
         elif is_elevated_util and not has_pressure:
+            # High utilization alone is a capacity warning, NOT high-severity congestion
             f_id = generate_id("F-PERF")
             now = datetime.now(timezone.utc)
             evidence_ids = [o.observation_id for o in util_obs]
-            missing_signals = []
-            if not queue_obs:
-                missing_signals.append("queue_drops")
-            if not loss_obs:
-                missing_signals.append("packet_loss_pct")
-
-            if missing_signals:
-                desc = (
-                    f"Elevated link utilization on {entity_id} ({max_util:.1f}%), but corroborating "
-                    f"buffer pressure observations ({', '.join(missing_signals)}) are missing or unavailable."
-                )
-            else:
-                desc = f"Elevated link utilization on {entity_id} ({max_util:.1f}%) without queue drops."
-            finding_type = "congestion_candidate"
-
             findings.append(
                 Finding(
                     finding_id=f_id,
                     incident_id=incident_id,
                     source_tower=TowerId.PERFORMANCE,
                     producer="performance.detect_congestion",
-                    finding_type=finding_type,
+                    finding_type="congestion_candidate",
                     severity=Severity.LOW,
                     status=FindingStatus.ACTIVE,
                     entity_refs=[entity_id],
                     evidence_refs=evidence_ids,
-                    confidence=0.35 if missing_signals else 0.55,
+                    confidence=0.55,
                     independence_group=f"telemetry:link_utilization:{entity_id}",
                     observed_at=util_obs[-1].timestamp,
                     created_at=now,
-                    description=desc,
-                    metadata={
-                        "peak_utilization_pct": max_util,
-                        "missing_signals": missing_signals,
-                        "has_missing_pressure": bool(missing_signals),
-                        "disposition": "insufficient_evidence" if missing_signals else "no_pressure",
-                    },
+                    description=f"Elevated link utilization on {entity_id} ({max_util:.1f}%) without queue drops.",
+                    metadata={"peak_utilization_pct": max_util},
                 )
             )
 

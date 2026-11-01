@@ -22,13 +22,7 @@ from netcoop.models.observations import (
     MetricObservation,
     TopologyObservation,
 )
-from netcoop.models.reports import (
-    ClaimEvidenceManifest,
-    FinalReport,
-    PathTriage,
-    ReportStatus,
-    TowerReport,
-)
+from netcoop.models.reports import ClaimEvidenceManifest, FinalReport, PathTriage, TowerReport
 from netcoop.supervisor.agent import SupervisoryRCAAgent
 from netcoop.supervisor.gate import EvidenceReleaseGate
 from netcoop.supervisor.models import (
@@ -320,30 +314,17 @@ class SupervisorRuntime:
         # Step 7: Gate Decision Resolution
         if gate_result.outcome == GateOutcome.ABSTAIN:
             self.state = IncidentLifecycleState.ABSTAINED
-            reason = proposal.abstain_reason or "Diagnostic ambiguity"
-            if proposal.abstain_type:
-                diag_status = proposal.abstain_type
-            elif "Normal telemetry" in reason:
-                diag_status = "NORMAL"
-            elif any(kw in reason.lower() for kw in ("inconclusive", "competing", "unresolved", "ambiguity")):
-                diag_status = "ABSTAIN_UNRESOLVED"
-            else:
-                diag_status = "INSUFFICIENT_EVIDENCE"
-
-            rep_status = "insufficient_evidence"
-
             report = gate_result.certified_final_report or FinalReport(
                 incident_id=incident_id,
-                status=rep_status,
-                diagnostic_status=diag_status,
-                suspected_root_cause=f"ABSTAIN: {reason}",
+                status="insufficient_evidence",
+                suspected_root_cause=f"ABSTAIN: {proposal.abstain_reason or 'Diagnostic ambiguity'}",
                 confidence=0.0,
                 affected_devices=proposal.affected_entities,
                 supporting_evidence=[],
                 alternative_causes=proposal.alternative_causes,
                 recommended_actions=proposal.recommended_actions,
                 evidence_sources=[],
-                limitations=[f"Supervisor decision: {diag_status.lower().replace('_', ' ')}."],
+                limitations=["Supervisor abstained due to ambiguity or insufficient evidence."],
                 generated_at=proposal.created_at,
             )
             report = self._add_path_triage(report, incident_id, observations)
@@ -356,8 +337,7 @@ class SupervisorRuntime:
             self.state = IncidentLifecycleState.ABSTAINED
             report = FinalReport(
                 incident_id=incident_id,
-                status=ReportStatus("insufficient_evidence"),
-                diagnostic_status="INSUFFICIENT_EVIDENCE",
+                status="insufficient_evidence",
                 suspected_root_cause="ABSTAIN: Evidence gate could not certify the diagnosis.",
                 confidence=0.0,
                 confidence_category=ConfidenceCategory.INSUFFICIENT,
