@@ -1,316 +1,264 @@
-import React, { useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { Activity, Database, Minus, Plus, RotateCcw, Router, Server, Wifi } from 'lucide-react';
 import { TopologyGraph, TopologyNode } from '../types';
-import { Server, Wifi, Cpu, Database } from 'lucide-react';
 
 interface TopologyViewProps {
   topology: TopologyGraph | null;
+  layoutKey?: string;
   selectedNodeId?: string;
   onSelectNode: (node: TopologyNode | null) => void;
   symptomEntities?: string[];
   inferredEntities?: string[];
 }
 
-// Preset coordinate mapping for canonical campus network
-const PRESET_COORDINATES: Record<string, { x: number; y: number }> = {
-  GW_EDGE_01: { x: 450, y: 50 },
-  SW_CORE_01: { x: 450, y: 160 },
-  SW_DIST_HOSTEL: { x: 250, y: 280 },
-  SW_DIST_DEPT: { x: 650, y: 280 },
-  AP_HOSTEL_A: { x: 150, y: 400 },
-  AP_HOSTEL_B: { x: 300, y: 400 },
-  SW_ACCESS_LAB: { x: 650, y: 400 },
-  SRV_DNS_01: { x: 750, y: 140 },
-  SRV_DHCP_01: { x: 750, y: 200 },
+interface Point { x: number; y: number }
+interface PositionedNode extends TopologyNode { x: number; y: number }
+
+const CANVAS = { width: 1120, height: 660 };
+const NODE_SPACING = { x: 190, y: 112 };
+
+const nodeLayer = (node: TopologyNode): number => {
+  const role = `${node.role} ${node.type}`.toLowerCase();
+  if (/gateway|edge|border_router/.test(role)) return 0;
+  if (/core|backbone/.test(role)) return 1;
+  if (/distribution|dist_switch/.test(role)) return 2;
+  if (/service|dns|dhcp|database/.test(role)) return 2;
+  if (/access_point|wireless|\bap\b|access_switch/.test(role)) return 3;
+  if (/segment|client|endpoint|hostel_zone/.test(role)) return 4;
+  return 2;
 };
+
+const buildLayout = (topology: TopologyGraph): Record<string, Point> => {
+  const groups = new Map<number, TopologyNode[]>();
+  topology.nodes.forEach((node) => {
+    const layer = nodeLayer(node);
+    groups.set(layer, [...(groups.get(layer) ?? []), node]);
+  });
+  const positions: Record<string, Point> = {};
+  groups.forEach((nodes, layer) => {
+    const sorted = [...nodes].sort((a, b) => `${a.role}:${a.name}:${a.id}`.localeCompare(`${b.role}:${b.name}:${b.id}`));
+    const x = 100 + layer * NODE_SPACING.x;
+    const totalHeight = Math.max(0, sorted.length - 1) * NODE_SPACING.y;
+    const startY = Math.max(90, (CANVAS.height - totalHeight) / 2);
+    sorted.forEach((node, index) => { positions[node.id] = { x, y: startY + index * NODE_SPACING.y }; });
+  });
+  return positions;
+};
+
+const statusStyle = (status: string) => {
+  if (status === 'probable_root_cause') return { stroke: '#FB7185', fill: '#321B2A', dot: '#FB7185', label: 'Probable cause' };
+  if (status === 'symptom') return { stroke: '#F5C26B', fill: '#302818', dot: '#F5C26B', label: 'Observed symptom' };
+  if (status === 'impacted') return { stroke: '#C4A1F2', fill: '#291F38', dot: '#C4A1F2', label: 'Predicted impact' };
+  return { stroke: '#55C6B0', fill: '#172A2B', dot: '#55C6B0', label: 'No observed impact' };
+};
+
+const shapeFor = (node: TopologyNode): 'gateway' | 'switch' | 'wireless' | 'service' | 'segment' => {
+  const role = `${node.role} ${node.type}`.toLowerCase();
+  if (/service|dns|dhcp|database/.test(role)) return 'service';
+  if (/wireless|access_point|\bap\b/.test(role)) return 'wireless';
+  if (/gateway|edge|border_router/.test(role)) return 'gateway';
+  if (/segment|client|endpoint|hostel_zone/.test(role)) return 'segment';
+  return 'switch';
+};
+
+const titleFor = (node: TopologyNode) => node.name && node.name !== node.id ? node.name : node.id;
 
 export const TopologyView: React.FC<TopologyViewProps> = ({
   topology,
+  layoutKey: externalLayoutKey,
   selectedNodeId,
   onSelectNode,
   symptomEntities = [],
   inferredEntities = [],
 }) => {
-  const [hoveredNode, setHoveredNode] = useState<TopologyNode | null>(null);
+  const [positions, setPositions] = useState<Record<string, Point>>({});
+  const [zoom, setZoom] = useState(1);
+  const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
+  const svgRef = useRef<SVGSVGElement>(null);
+  const dragRef = useRef<{ id: string; moved: boolean; startX: number; startY: number } | null>(null);
+  const layoutKey = topology ? `${externalLayoutKey ?? ''}:${topology.topology_id}:${topology.nodes.map((node) => node.id).join('|')}` : '';
 
-  if (!topology || topology.nodes.length === 0) {
-    return (
-      <div className="w-full h-full min-h-[480px] flex flex-col items-center justify-center bg-noc-panel/40 border border-noc-border rounded-xl text-noc-muted">
-        <Server className="w-10 h-10 mb-2 opacity-30" />
-        <p className="text-sm font-mono">No topology loaded. Select a scenario above.</p>
-      </div>
-    );
-  }
+  useEffect(() => {
+    if (topology) setPositions(buildLayout(topology));
+    setZoom(1);
+  }, [layoutKey]);
 
-  // Calculate layout coordinates
-  const nodesWithCoords = topology.nodes.map((node, index) => {
-    if (PRESET_COORDINATES[node.id]) {
-      return { ...node, ...PRESET_COORDINATES[node.id] };
-    }
-    // Fallback circular layout for arbitrary topologies
-    const angle = (index / topology.nodes.length) * 2 * Math.PI;
-    const x = 450 + 260 * Math.cos(angle);
-    const y = 250 + 170 * Math.sin(angle);
-    return { ...node, x, y };
-  });
+  const positionedNodes = useMemo<PositionedNode[]>(() => (topology?.nodes ?? []).map((node) => ({
+    ...node,
+    ...(positions[node.id] ?? { x: CANVAS.width / 2, y: CANVAS.height / 2 }),
+  })), [topology, positions]);
+  const nodeMap = useMemo(() => new Map(positionedNodes.map((node) => [node.id, node])), [positionedNodes]);
 
-  const nodeMap = new Map(nodesWithCoords.map(n => [n.id, n]));
-
-  const getNodeRoleIcon = (role: string, type: string) => {
-    const r = role.toLowerCase();
-    if (r.includes('gateway') || r.includes('edge')) return <Server className="w-4 h-4 text-cyan-400" />;
-    if (r.includes('core')) return <Cpu className="w-4 h-4 text-indigo-400" />;
-    if (r.includes('dist') || r.includes('access')) return <Server className="w-4 h-4 text-noc-muted" />;
-    if (r.includes('wireless') || r.includes('ap')) return <Wifi className="w-4 h-4 text-amber-400" />;
-    if (r.includes('dns') || r.includes('dhcp') || type === 'service') return <Database className="w-4 h-4 text-purple-400" />;
-    return <Server className="w-4 h-4 text-noc-muted" />;
-  };
-
-  const getNodeStatus = (node: TopologyNode): 'nominal' | 'symptom' | 'impacted' | 'probable_root_cause' => {
-    if (node.status === 'probable_root_cause') {
-      return 'probable_root_cause';
-    }
-    if (symptomEntities.includes(node.id)) {
-      return 'symptom';
-    }
-    if (inferredEntities.includes(node.id)) {
-      return 'impacted';
-    }
+  const nodeStatus = (node: TopologyNode) => {
+    if (node.status === 'probable_root_cause') return 'probable_root_cause';
+    if (symptomEntities.includes(node.id)) return 'symptom';
+    if (inferredEntities.includes(node.id)) return 'impacted';
     return node.status || 'nominal';
   };
 
-  return (
-    <div className="relative w-full h-[520px] bg-noc-panel/60 border border-noc-border rounded-xl overflow-hidden select-none shadow-inner">
-      {/* Topology Header & Status Legend */}
-      <div className="absolute top-4 left-4 z-10 flex flex-col space-y-2 pointer-events-none">
-        <div className="flex items-center space-x-2 bg-noc-bg/80 backdrop-blur px-3 py-1.5 rounded-lg border border-noc-border text-xs">
-          <span className="font-mono font-medium text-noc-text">{topology.topology_id}</span>
-          <span className="text-noc-muted">({topology.nodes.length} nodes, {topology.links.length} links)</span>
-        </div>
+  const handlePointerDown = (event: React.PointerEvent<SVGGElement>, node: TopologyNode) => {
+    event.preventDefault();
+    event.stopPropagation();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    dragRef.current = { id: node.id, moved: false, startX: event.clientX, startY: event.clientY };
+  };
 
-        {/* Legend */}
-        <div className="flex items-center space-x-3 bg-noc-bg/80 backdrop-blur px-3 py-1.5 rounded-lg border border-noc-border text-[11px] font-mono">
-          <span className="flex items-center space-x-1.5 text-noc-cyan">
-            <span className="w-2 h-2 rounded-full bg-noc-cyan" />
-            <span>Nominal</span>
-          </span>
-          <span className="flex items-center space-x-1.5 text-noc-yellow">
-            <span className="w-2 h-2 rounded-full bg-noc-yellow animate-ping" />
-            <span>Observed Symptom</span>
-          </span>
-          <span className="flex items-center space-x-1.5 text-noc-purple">
-            <span className="w-2 h-2 rounded-full bg-noc-purple" />
-            <span>Inferred Impact</span>
-          </span>
-          <span className="flex items-center space-x-1.5 text-noc-red">
-            <span className="w-2.5 h-2.5 rounded-full bg-noc-red ring-2 ring-noc-red/40" />
-            <span>Probable Root Cause</span>
-          </span>
+  const handlePointerMove = (event: React.PointerEvent<SVGSVGElement>) => {
+    const drag = dragRef.current;
+    const svg = svgRef.current;
+    if (!drag || !svg) return;
+    const screenMatrix = svg.getScreenCTM();
+    if (!screenMatrix) return;
+    const pointer = svg.createSVGPoint();
+    pointer.x = event.clientX;
+    pointer.y = event.clientY;
+    const point = pointer.matrixTransform(screenMatrix.inverse());
+    if (Math.abs(event.clientX - drag.startX) + Math.abs(event.clientY - drag.startY) > 4) drag.moved = true;
+    if (!drag.moved) return;
+    const center = { x: CANVAS.width / 2, y: CANVAS.height / 2 };
+    setPositions((current) => ({ ...current, [drag.id]: {
+      x: Math.max(78, Math.min(CANVAS.width - 78, center.x + (point.x - center.x) / zoom)),
+      y: Math.max(55, Math.min(CANVAS.height - 55, center.y + (point.y - center.y) / zoom)),
+    } }));
+  };
+
+  const handlePointerUp = (event: React.PointerEvent<SVGGElement>) => {
+    const drag = dragRef.current;
+    if (!drag) return;
+    if (!drag.moved) onSelectNode(drag.id === selectedNodeId ? null : nodeMap.get(drag.id) ?? null);
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+    dragRef.current = null;
+  };
+
+  const selectWithKeyboard = (event: React.KeyboardEvent<SVGGElement>, node: PositionedNode) => {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      onSelectNode(node.id === selectedNodeId ? null : node);
+    }
+  };
+
+  if (!topology || topology.nodes.length === 0) {
+    return (
+      <section className="rounded-2xl border border-noc-border bg-noc-panel/70 p-7 shadow-panel">
+        <div className="flex min-h-[360px] flex-col items-center justify-center text-center">
+          <div className="mb-4 rounded-2xl border border-noc-border bg-noc-subpanel p-4 text-noc-amethyst"><Router className="h-8 w-8" /></div>
+          <h3 className="text-sm font-semibold text-noc-text">Your network map will appear here</h3>
+          <p className="mt-2 max-w-md text-xs leading-6 text-noc-muted">Choose a simulation case or upload telemetry with a topology map. You can drag nodes into a layout that makes sense for your site.</p>
+        </div>
+      </section>
+    );
+  }
+
+  const selectedNode = selectedNodeId ? nodeMap.get(selectedNodeId) : null;
+  const zoomBy = (direction: number) => setZoom((current) => Math.max(0.65, Math.min(1.7, current + direction)));
+
+  return (
+    <section className="overflow-hidden rounded-2xl border border-noc-border bg-noc-panel/75 shadow-panel">
+      <div className="flex flex-wrap items-start justify-between gap-4 border-b border-noc-border px-5 py-4">
+        <div>
+          <div className="flex items-center gap-2 text-noc-amethyst"><Activity className="h-4 w-4" /><span className="text-[10px] font-semibold uppercase tracking-[0.18em]">Live network map</span></div>
+          <h2 className="mt-1 text-sm font-semibold text-noc-text">{topology.topology_id.replace(/[_-]+/g, ' ')}</h2>
+          <p className="mt-1 text-[11px] text-noc-muted">{topology.nodes.length} devices · {topology.links.length} relationships <span className="mx-1.5 text-noc-border">/</span> Drag a node to arrange the map</p>
+        </div>
+        <div className="flex items-center gap-1 rounded-xl border border-noc-border bg-noc-bg/70 p-1">
+          <button aria-label="Zoom out" title="Zoom out" onClick={() => zoomBy(-0.12)} className="rounded-lg p-2 text-noc-muted hover:bg-noc-hover hover:text-noc-text"><Minus className="h-3.5 w-3.5" /></button>
+          <span className="min-w-12 text-center font-mono text-[10px] text-noc-muted">{Math.round(zoom * 100)}%</span>
+          <button aria-label="Zoom in" title="Zoom in" onClick={() => zoomBy(0.12)} className="rounded-lg p-2 text-noc-muted hover:bg-noc-hover hover:text-noc-text"><Plus className="h-3.5 w-3.5" /></button>
+          <span className="mx-1 h-5 w-px bg-noc-border" />
+          <button aria-label="Reset map layout" title="Reset map layout" onClick={() => { setPositions(buildLayout(topology)); setZoom(1); }} className="rounded-lg p-2 text-noc-muted hover:bg-noc-hover hover:text-noc-text"><RotateCcw className="h-3.5 w-3.5" /></button>
+        </div>
+        <div className="flex w-full flex-wrap gap-x-4 gap-y-2 border-t border-noc-border/60 pt-3 text-[10px] text-noc-muted sm:w-auto sm:border-0 sm:pt-0">
+          {[
+            ['#55C6B0', 'No observed impact'], ['#F5C26B', 'Observed symptom'], ['#C4A1F2', 'Predicted impact'], ['#FB7185', 'Probable cause'],
+          ].map(([color, label]) => <span key={label} className="inline-flex items-center gap-1.5"><i className="h-2 w-2 rounded-full" style={{ backgroundColor: color }} />{label}</span>)}
         </div>
       </div>
 
-      {/* SVG Canvas */}
-      <svg className="w-full h-full" viewBox="0 0 900 500">
-        <defs>
-          <filter id="glow-root" x="-20%" y="-20%" width="140%" height="140%">
-            <feDropShadow dx="0" dy="0" stdDeviation="6" floodColor="#F43F5E" floodOpacity="0.8" />
-          </filter>
-          <filter id="glow-symptom" x="-20%" y="-20%" width="140%" height="140%">
-            <feDropShadow dx="0" dy="0" stdDeviation="4" floodColor="#F59E0B" floodOpacity="0.7" />
-          </filter>
-          <filter id="glow-impact" x="-20%" y="-20%" width="140%" height="140%">
-            <feDropShadow dx="0" dy="0" stdDeviation="4" floodColor="#A855F7" floodOpacity="0.6" />
-          </filter>
-        </defs>
-
-        {/* Render Links */}
-        <g className="links">
-          {topology.links.map(link => {
-            const src = nodeMap.get(link.source);
-            const tgt = nodeMap.get(link.target);
-            if (!src || !tgt) return null;
-
-            const isDegraded = link.status === 'congested' || link.status === 'degraded';
-            const strokeColor = isDegraded ? '#F43F5E' : '#2A3452';
-            const strokeWidth = isDegraded ? 2.5 : 1.5;
-
-            return (
-              <g key={link.id}>
-                <line
-                  x1={src.x}
-                  y1={src.y}
-                  x2={tgt.x}
-                  y2={tgt.y}
-                  stroke={strokeColor}
-                  strokeWidth={strokeWidth}
-                  strokeOpacity={0.8}
-                  className={isDegraded ? 'animate-link-congested' : 'animate-link-pulse'}
-                />
-              </g>
-            );
-          })}
-        </g>
-
-        {/* Render Nodes */}
-        <g className="nodes">
-          {nodesWithCoords.map(node => {
-            const status = getNodeStatus(node);
-            const isSelected = selectedNodeId === node.id;
-            const isHovered = hoveredNode?.id === node.id;
-
-            let borderColor = '#2E3A5F';
-            let fillColor = '#121624';
-            let filter = undefined;
-
-            if (status === 'probable_root_cause') {
-              borderColor = '#F43F5E';
-              fillColor = '#2D1520';
-              filter = 'url(#glow-root)';
-            } else if (status === 'symptom') {
-              borderColor = '#F59E0B';
-              fillColor = '#251D14';
-              filter = 'url(#glow-symptom)';
-            } else if (status === 'impacted') {
-              borderColor = '#A855F7';
-              fillColor = '#1F172B';
-              filter = 'url(#glow-impact)';
-            } else if (isSelected || isHovered) {
-              borderColor = '#818CF8';
-            }
-
-            return (
-              <g
-                key={node.id}
-                transform={`translate(${node.x}, ${node.y})`}
-                className="cursor-pointer transition-transform duration-150"
-                onClick={() => onSelectNode(isSelected ? null : node)}
-                onMouseEnter={() => setHoveredNode(node)}
-                onMouseLeave={() => setHoveredNode(null)}
-              >
-                {/* Node Outer Container */}
-                <rect
-                  x="-65"
-                  y="-22"
-                  width="130"
-                  height="44"
-                  rx="8"
-                  fill={fillColor}
-                  stroke={borderColor}
-                  strokeWidth={isSelected ? 2.5 : status !== 'nominal' ? 2 : 1.5}
-                  filter={filter}
-                />
-
-                {/* Node Status Indicator Pill */}
-                <circle
-                  cx="-48"
-                  cy="0"
-                  r="5"
-                  fill={
-                    status === 'probable_root_cause'
-                      ? '#F43F5E'
-                      : status === 'symptom'
-                      ? '#F59E0B'
-                      : status === 'impacted'
-                      ? '#A855F7'
-                      : '#10B981'
-                  }
-                />
-
-                {/* Node Label Text */}
-                <text
-                  x="-35"
-                  y="-4"
-                  fill="#F1F5F9"
-                  fontSize="10.5"
-                  fontWeight="600"
-                  fontFamily="monospace"
-                  className="pointer-events-none"
+      <div className="relative h-[460px] bg-[radial-gradient(ellipse_at_center,_rgba(124,91,162,0.11),_transparent_68%)] sm:h-[560px]">
+        <svg
+          ref={svgRef}
+          className="h-full w-full touch-none"
+          viewBox={`0 0 ${CANVAS.width} ${CANVAS.height}`}
+          aria-label={`Network topology containing ${topology.nodes.length} nodes and ${topology.links.length} links`}
+          onPointerMove={handlePointerMove}
+          onWheel={(event) => { event.preventDefault(); zoomBy(event.deltaY < 0 ? 0.08 : -0.08); }}
+        >
+          <defs>
+            <pattern id="topology-grid" width="32" height="32" patternUnits="userSpaceOnUse"><circle cx="1" cy="1" r="1" fill="#8B7AA7" fillOpacity="0.18" /></pattern>
+            <filter id="node-shadow" x="-35%" y="-35%" width="170%" height="170%"><feDropShadow dx="0" dy="5" stdDeviation="6" floodColor="#080811" floodOpacity="0.55" /></filter>
+            <marker id="edge-dot" markerWidth="6" markerHeight="6" refX="3" refY="3" orient="auto"><circle cx="3" cy="3" r="2" fill="#8F83A8" /></marker>
+            <marker id="edge-alert" markerWidth="7" markerHeight="7" refX="3.5" refY="3.5" orient="auto"><circle cx="3.5" cy="3.5" r="2.5" fill="#FB7185" /></marker>
+          </defs>
+          <rect width={CANVAS.width} height={CANVAS.height} fill="url(#topology-grid)" />
+          <g transform={`translate(${CANVAS.width / 2} ${CANVAS.height / 2}) scale(${zoom}) translate(${-CANVAS.width / 2} ${-CANVAS.height / 2})`}>
+            <g aria-hidden="true">
+              {topology.links.map((link, index) => {
+                const source = nodeMap.get(link.source);
+                const target = nodeMap.get(link.target);
+                if (!source || !target) return null;
+                const degraded = ['congested', 'degraded', 'down'].includes(link.status);
+                const bend = (index % 2 ? 1 : -1) * Math.min(30, Math.abs(target.y - source.y) * 0.08 + 10);
+                const midX = (source.x + target.x) / 2;
+                const midY = (source.y + target.y) / 2 + bend;
+                return <g key={link.id}>
+                  <path d={`M ${source.x} ${source.y} Q ${midX} ${midY} ${target.x} ${target.y}`} fill="none" stroke={degraded ? '#FB7185' : '#766A8D'} strokeWidth={degraded ? 2.5 : 1.6} strokeOpacity={degraded ? 0.82 : 0.48} strokeDasharray={link.status === 'down' ? '6 7' : undefined} markerEnd={`url(#${degraded ? 'edge-alert' : 'edge-dot'})`} />
+                </g>;
+              })}
+            </g>
+            {positionedNodes.map((node) => {
+              const status = nodeStatus(node);
+              const palette = statusStyle(status);
+              const selected = selectedNodeId === node.id;
+              const hovered = hoveredNodeId === node.id;
+              const shape = shapeFor(node);
+              const label = titleFor(node);
+              const clippedLabel = label.length > 21 ? `${label.slice(0, 20)}…` : label;
+              return (
+                <g
+                  key={node.id}
+                  transform={`translate(${node.x} ${node.y})`}
+                  role="button"
+                  tabIndex={0}
+                  aria-label={`${label}, ${node.role.replace(/_/g, ' ')}, ${palette.label}. Drag to move.`}
+                  className="cursor-grab outline-none active:cursor-grabbing"
+                  onPointerDown={(event) => handlePointerDown(event, node)}
+                  onPointerUp={handlePointerUp}
+                  onPointerCancel={handlePointerUp}
+                  onKeyDown={(event) => selectWithKeyboard(event, node)}
+                  onMouseEnter={() => setHoveredNodeId(node.id)}
+                  onMouseLeave={() => setHoveredNodeId(null)}
                 >
-                  {node.id}
-                </text>
+                  <g filter="url(#node-shadow)">
+                    {shape === 'gateway' && <polygon points="-53,-30 38,-30 58,-15 58,15 38,30 -53,30 -62,0" fill={palette.fill} stroke={palette.stroke} strokeWidth={selected || hovered ? 2.6 : 1.6} />}
+                    {shape === 'switch' && <rect x="-63" y="-29" width="126" height="58" rx="13" fill={palette.fill} stroke={palette.stroke} strokeWidth={selected || hovered ? 2.6 : 1.6} />}
+                    {shape === 'wireless' && <ellipse cx="0" cy="0" rx="65" ry="29" fill={palette.fill} stroke={palette.stroke} strokeWidth={selected || hovered ? 2.6 : 1.6} />}
+                    {shape === 'service' && <path d="M -58 -20 C -58 -34 58 -34 58 -20 L 58 20 C 58 34 -58 34 -58 20 Z M -58 -20 C -58 -6 58 -6 58 -20" fill={palette.fill} stroke={palette.stroke} strokeWidth={selected || hovered ? 2.6 : 1.6} />}
+                    {shape === 'segment' && <polygon points="-50,-29 50,-29 65,0 50,29 -50,29 -65,0" fill={palette.fill} stroke={palette.stroke} strokeWidth={selected || hovered ? 2.6 : 1.6} />}
+                  </g>
+                  <circle cx="-44" cy="0" r="4.5" fill={palette.dot} />
+                  <text x="-34" y="-3" fill="#F5EFFB" fontSize="11" fontWeight="600" fontFamily="ui-monospace, monospace" pointerEvents="none">{clippedLabel}</text>
+                  <text x="-34" y="14" fill="#A99DB7" fontSize="9" fontFamily="Inter, sans-serif" pointerEvents="none">{node.role.replace(/_/g, ' ').slice(0, 22)}</text>
+                  {selected && <circle cx="55" cy="-23" r="4" fill="#F1D6AA" stroke="#12111A" strokeWidth="2" />}
+                </g>
+              );
+            })}
+          </g>
+        </svg>
 
-                {/* Node Subtitle (Role) */}
-                <text
-                  x="-35"
-                  y="11"
-                  fill="#94A3B8"
-                  fontSize="8.5"
-                  fontFamily="sans-serif"
-                  className="pointer-events-none capitalize"
-                >
-                  {node.role.replace(/_/g, ' ')}
-                </text>
-              </g>
-            );
-          })}
-        </g>
-      </svg>
-
-      {/* Selected Node Details Drawer in Bottom Right */}
-      {selectedNodeId && nodeMap.get(selectedNodeId) && (
-        <div className="absolute bottom-4 right-4 z-20 w-80 bg-noc-panel/95 backdrop-blur border border-noc-border rounded-xl p-4 shadow-xl">
-          {(() => {
-            const node = nodeMap.get(selectedNodeId)!;
-            const status = getNodeStatus(node);
-            return (
-              <div>
-                <div className="flex items-center justify-between pb-2 border-b border-noc-border mb-3">
-                  <div className="flex items-center space-x-2">
-                    {getNodeRoleIcon(node.role, node.type)}
-                    <span className="font-mono font-bold text-sm text-noc-text">{node.id}</span>
-                  </div>
-                  <button
-                    onClick={() => onSelectNode(null)}
-                    className="text-noc-muted hover:text-noc-text text-xs"
-                  >
-                    ✕
-                  </button>
-                </div>
-
-                <div className="space-y-2 text-xs font-mono">
-                  <div className="flex justify-between">
-                    <span className="text-noc-muted">Role:</span>
-                    <span className="text-noc-text">{node.role}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-noc-muted">Type:</span>
-                    <span className="text-noc-text capitalize">{node.type}</span>
-                  </div>
-                  <div className="flex justify-between items-center">
-                    <span className="text-noc-muted">Status:</span>
-                    <span
-                      className={`px-2 py-0.5 rounded text-[11px] font-semibold ${
-                        status === 'probable_root_cause'
-                          ? 'bg-rose-950 text-rose-300 border border-rose-800'
-                          : status === 'symptom'
-                          ? 'bg-amber-950 text-amber-300 border border-amber-800'
-                          : status === 'impacted'
-                          ? 'bg-purple-950 text-purple-300 border border-purple-800'
-                          : 'bg-emerald-950 text-emerald-300 border border-emerald-800'
-                      }`}
-                    >
-                      {status.replace(/_/g, ' ').toUpperCase()}
-                    </span>
-                  </div>
-                  <div className="pt-2 text-[11px] text-noc-muted border-t border-noc-border">
-                    {status === 'probable_root_cause' && (
-                      <p className="text-rose-300">Certified by Evidence Gate as root cause candidate.</p>
-                    )}
-                    {status === 'symptom' && (
-                      <p className="text-amber-300">Observed active telemetry or log anomalies.</p>
-                    )}
-                    {status === 'impacted' && (
-                      <p className="text-purple-300">Predicted impact candidate via topology reachability.</p>
-                    )}
-                    {status === 'nominal' && (
-                      <p className="text-emerald-300">Operating within healthy baseline thresholds.</p>
-                    )}
-                  </div>
-                </div>
-              </div>
-            );
-          })()}
-        </div>
-      )}
-    </div>
+        {selectedNode && <div className="absolute bottom-4 right-4 z-10 w-[min(320px,calc(100%-2rem))] rounded-2xl border border-noc-border bg-noc-bg/95 p-4 shadow-2xl backdrop-blur">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <div className="flex items-center gap-2 text-noc-amethyst">{shapeFor(selectedNode) === 'service' ? <Database className="h-4 w-4" /> : shapeFor(selectedNode) === 'wireless' ? <Wifi className="h-4 w-4" /> : shapeFor(selectedNode) === 'gateway' ? <Router className="h-4 w-4" /> : <Server className="h-4 w-4" />}<span className="text-[10px] font-semibold uppercase tracking-widest">Selected device</span></div>
+              <h3 className="mt-1 text-sm font-semibold text-noc-text">{titleFor(selectedNode)}</h3>
+              <p className="mt-1 text-[11px] text-noc-muted">{selectedNode.role.replace(/_/g, ' ')} · {selectedNode.type}</p>
+            </div>
+            <button aria-label="Close node details" onClick={() => onSelectNode(null)} className="rounded-lg px-2 py-1 text-xs text-noc-muted hover:bg-noc-hover hover:text-noc-text">×</button>
+          </div>
+          <div className="mt-3 flex items-center gap-2 border-t border-noc-border pt-3 text-xs" style={{ color: statusStyle(nodeStatus(selectedNode)).dot }}>
+            <i className="h-2 w-2 rounded-full" style={{ backgroundColor: statusStyle(nodeStatus(selectedNode)).dot }} />{statusStyle(nodeStatus(selectedNode)).label}
+          </div>
+        </div>}
+      </div>
+    </section>
   );
 };

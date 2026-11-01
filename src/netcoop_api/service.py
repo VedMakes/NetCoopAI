@@ -104,6 +104,44 @@ SCENARIO_CATALOG_META = {
     },
 }
 
+EDGE_CASE_CATALOG_META = {
+    "edge_red_herring_high_utilization": {
+        "name": "High utilization, no user impact",
+        "category": "False positive trap",
+        "suite": "edge",
+        "description": "A 92.5% utilization sample with zero packet loss and queue drops; the safe result is to avoid diagnosing congestion from utilization alone.",
+        "symptoms": "High utilization is present, while packet loss and queue drops remain at zero.",
+    },
+    "edge_compound_dns_dhcp": {
+        "name": "DNS and DHCP failures together",
+        "category": "Compound services",
+        "suite": "edge",
+        "description": "Combines DNS and DHCP service telemetry to exercise two distinct specialist-to-connectivity path checks in one incident.",
+        "symptoms": "Name resolution and address assignment failures appear in the same capture.",
+    },
+    "edge_compound_dns_congestion": {
+        "name": "DNS failure with uplink congestion",
+        "category": "Compound faults",
+        "suite": "edge",
+        "description": "Combines generated DNS failure and link congestion telemetry from the same seed to test whether both causes survive synthesis.",
+        "symptoms": "DNS service errors and congested uplink evidence overlap in one incident.",
+    },
+    "edge_malformed_capture": {
+        "name": "Valid capture with a malformed row",
+        "category": "Input resilience",
+        "suite": "edge",
+        "description": "Adds a malformed JSONL row to a valid congestion capture; valid evidence should remain usable and the bad row should be disclosed.",
+        "symptoms": "A valid link congestion capture contains one broken JSONL record.",
+    },
+    "edge_invalid_topology": {
+        "name": "Valid telemetry with a broken map",
+        "category": "Input resilience",
+        "suite": "edge",
+        "description": "Pairs valid congestion telemetry with malformed topology JSON; the map should be rejected while telemetry diagnosis continues with a limitation.",
+        "symptoms": "A valid congestion capture arrives with a topology file that cannot be parsed.",
+    },
+}
+
 
 class RunRecord:
     def __init__(
@@ -209,6 +247,14 @@ class RunManager:
                         and turn.get("role") in {"user", "assistant"}
                         and isinstance(turn.get("content"), str)
                     ] if isinstance(history, list) else []
+                    operator_context = session.get("operator_context", [])
+                    session["operator_context"] = [
+                        item[:2000] for item in operator_context[-20:] if isinstance(item, str)
+                    ] if isinstance(operator_context, list) and operator_context else [
+                        turn["content"][:2000]
+                        for turn in session["assistant_history"]
+                        if turn["role"] == "user"
+                    ][-20:]
                     if not isinstance(session.get("current_run_id"), str):
                         session["current_run_id"] = None
                     self._sessions[session_id] = session
@@ -225,6 +271,7 @@ class RunManager:
             "current_run_id": None,
             "run_ids": [],
             "assistant_history": [],
+            "operator_context": [],
         }
         with self._lock:
             self._sessions[session["session_id"]] = session
@@ -273,11 +320,18 @@ class RunManager:
                     and turn.get("role") in {"user", "assistant"}
                     and isinstance(turn.get("content"), str)
                 ] if isinstance(disk_history, list) else current.get("assistant_history", [])
+                disk_context = disk_session.get("operator_context", [])
+                safe_context = [
+                    item[:2000] for item in disk_context[-20:] if isinstance(item, str)
+                ] if isinstance(disk_context, list) and disk_context else [
+                    turn["content"][:2000] for turn in safe_history if turn["role"] == "user"
+                ][-20:]
                 disk_current = disk_session.get("current_run_id")
                 current.update({
                     "title": str(disk_session.get("title") or current.get("title") or "Network investigation")[:120],
                     "run_ids": merged_ids,
                     "assistant_history": safe_history,
+                    "operator_context": safe_context,
                     "current_run_id": disk_current if disk_current in merged_ids else current.get("current_run_id"),
                     "updated_at": max(
                         str(current.get("updated_at", "")),
@@ -308,6 +362,46 @@ class RunManager:
             session = self._sessions.get(session_id)
             return list(session.get("assistant_history", [])) if session else None
 
+    def get_session_operator_context(self, session_id: str) -> list[str] | None:
+        """Return bounded user-provided context separately from run telemetry."""
+        self.refresh_external_state()
+        with self._lock:
+            session = self._sessions.get(session_id)
+            return list(session.get("operator_context", [])) if session else None
+
+    @staticmethod
+    def _remember_operator_context(session: dict[str, Any], text: str) -> None:
+        context = session.setdefault("operator_context", [])
+        context.append(text[:2000])
+        while len(context) > 20 or sum(len(item) for item in context) > 12_000:
+            context.pop(0)
+
+    def append_session_user_turn(self, session_id: str, question: str) -> None:
+        """Persist user wording as unverified context even when inference fails."""
+        self.refresh_external_state()
+        with self._lock:
+            session = self._sessions.get(session_id)
+            if session is None:
+                return
+            history = session.setdefault("assistant_history", [])
+            history.append({"role": "user", "content": question[:2000]})
+            session["assistant_history"] = history[-40:]
+            self._remember_operator_context(session, question)
+            session["updated_at"] = datetime.now(timezone.utc).isoformat()
+            self._persist_session(session)
+
+    def append_session_assistant_response(self, session_id: str, answer: str) -> None:
+        self.refresh_external_state()
+        with self._lock:
+            session = self._sessions.get(session_id)
+            if session is None:
+                return
+            history = session.setdefault("assistant_history", [])
+            history.append({"role": "assistant", "content": answer[:4000]})
+            session["assistant_history"] = history[-40:]
+            session["updated_at"] = datetime.now(timezone.utc).isoformat()
+            self._persist_session(session)
+
     def append_session_assistant_turns(self, session_id: str, question: str, answer: str) -> None:
         self.refresh_external_state()
         with self._lock:
@@ -320,6 +414,7 @@ class RunManager:
                 {"role": "assistant", "content": answer[:4000]},
             ])
             session["assistant_history"] = history[-40:]
+            self._remember_operator_context(session, question)
             session["updated_at"] = datetime.now(timezone.utc).isoformat()
             self._persist_session(session)
 
@@ -330,6 +425,7 @@ class RunManager:
             if session is None:
                 return False
             session["assistant_history"] = []
+            session["operator_context"] = []
             session["updated_at"] = datetime.now(timezone.utc).isoformat()
             self._persist_session(session)
         return True
@@ -563,6 +659,31 @@ class RunManager:
             return None
         return candidate
 
+    @staticmethod
+    def _scenario_metadata(scenario_id: str) -> dict[str, str]:
+        if scenario_id in SCENARIO_CATALOG_META:
+            return {**SCENARIO_CATALOG_META[scenario_id], "suite": "challenge"}
+        if scenario_id in EDGE_CASE_CATALOG_META:
+            return EDGE_CASE_CATALOG_META[scenario_id]
+        if scenario_id.startswith("netcoop_"):
+            preset, separator, seed = scenario_id.removeprefix("netcoop_").rpartition("_seed_")
+            if separator and preset in SCENARIO_CATALOG_META and seed in {"7", "42", "2026"}:
+                base = SCENARIO_CATALOG_META[preset]
+                return {
+                    "name": f"{base['name']} · seed {seed}",
+                    "category": f"Seed {seed}",
+                    "suite": "netcoop",
+                    "description": f"NetCoop generator regression case for {base['name']} using seed {seed} and 15 time steps.",
+                    "symptoms": base["symptoms"],
+                }
+        return {
+            "name": scenario_id.replace("_", " ").title(),
+            "category": "Other",
+            "suite": "challenge",
+            "description": f"Local scenario for {scenario_id}.",
+            "symptoms": "Network telemetry anomaly capture",
+        }
+
     def list_scenarios(self) -> list[ScenarioSummary]:
         results: list[ScenarioSummary] = []
         if not self.scenarios_dir.exists():
@@ -571,16 +692,12 @@ class RunManager:
         for p in sorted(self.scenarios_dir.iterdir()):
             scenario_path = self._scenario_path(p.name)
             if scenario_path is not None:
-                meta = SCENARIO_CATALOG_META.get(scenario_path.name, {
-                    "name": scenario_path.name.replace("_", " ").title(),
-                    "category": "Synthetic",
-                    "description": f"Synthetic scenario for {scenario_path.name}",
-                    "symptoms": "Network telemetry anomaly capture",
-                })
+                meta = self._scenario_metadata(scenario_path.name)
                 results.append(ScenarioSummary(
                     scenario_id=scenario_path.name,
                     name=meta["name"],
                     category=meta["category"],
+                    suite=meta["suite"],
                     description=meta["description"],
                     fixture_path=str(scenario_path),
                     symptoms_summary=meta["symptoms"],
@@ -592,12 +709,7 @@ class RunManager:
         if scenario_path is None:
             return None
 
-        meta = SCENARIO_CATALOG_META.get(scenario_id, {
-            "name": scenario_id.replace("_", " ").title(),
-            "category": "Synthetic",
-            "description": f"Synthetic scenario for {scenario_id}",
-            "symptoms": "Network telemetry anomaly capture",
-        })
+        meta = self._scenario_metadata(scenario_id)
 
         node_count = 0
         link_count = 0
@@ -616,6 +728,7 @@ class RunManager:
             scenario_id=scenario_id,
             name=meta["name"],
             category=meta["category"],
+            suite=meta["suite"],
             description=meta["description"],
             fixture_path=str(scenario_path),
             symptoms_summary=meta["symptoms"],
@@ -1439,7 +1552,7 @@ class RunManager:
                     "running",
                     {"decision_loop_participant": False},
                 )
-                symptom_addendum = SymptomReasoningAgent(llm_mode=llm_mode).analyze(
+                symptom_addendum = SymptomReasoningAgent(llm_mode="on").analyze(
                     symptom=symptom_chat,
                     report=report,
                     observations=observations,

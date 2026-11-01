@@ -1,0 +1,278 @@
+{
+  "topology_id": "TOPO-IIT-CAMPUS-01",
+  "schema_version": "1.0",
+  "nodes": [
+    {
+      "entity_id": "GW_EDGE_01",
+      "entity_type": "device",
+      "role": "gateway",
+      "name": "Campus Edge Gateway"
+    },
+    {
+      "entity_id": "SW_CORE_01",
+      "entity_type": "device",
+      "role": "core_switch",
+      "name": "Campus Core Backbone Switch"
+    },
+    {
+      "entity_id": "SW_DIST_HOSTEL",
+      "entity_type": "device",
+      "role": "distribution_switch",
+      "name": "Hostel Distribution Switch"
+    },
+    {
+      "entity_id": "SW_DIST_DEPT",
+      "entity_type": "device",
+      "role": "distribution_switch",
+      "name": "Academic Department Switch"
+    },
+    {
+      "entity_id": "SW_ACCESS_LAB",
+      "entity_type": "device",
+      "role": "access_switch",
+      "name": "Computing Lab Access Switch"
+    },
+    {
+      "entity_id": "AP_HOSTEL_A",
+      "entity_type": "access_point",
+      "role": "wireless_ap",
+      "name": "Hostel Block A Access Point"
+    },
+    {
+      "entity_id": "AP_HOSTEL_B",
+      "entity_type": "access_point",
+      "role": "wireless_ap",
+      "name": "Hostel Block B Access Point"
+    },
+    {
+      "entity_id": "SRV_DNS_01",
+      "entity_type": "service",
+      "role": "dns_server",
+      "name": "Campus Recursive DNS Server"
+    },
+    {
+      "entity_id": "SRV_DHCP_01",
+      "entity_type": "service",
+      "role": "dhcp_server",
+      "name": "Campus Central DHCP Server"
+    },
+    {
+      "entity_id": "HOSTEL_ZONE_A",
+      "entity_type": "hostel_zone",
+      "role": "client_segment",
+      "name": "Hostel Block A Student Segment"
+    }
+  ],
+  "interfaces": [
+    {
+      "interface_id": "GW_EDGE_01:eth0",
+      "device_id": "GW_EDGE_01",
+      "speed_mbps": 10000.0
+    },
+    {
+      "interface_id": "GW_EDGE_01:eth1",
+      "device_id": "GW_EDGE_01",
+      "speed_mbps": 10000.0
+    },
+    {
+      "interface_id": "SW_CORE_01:Gi0/1",
+      "device_id": "SW_CORE_01",
+      "speed_mbps": 10000.0
+    },
+    {
+      "interface_id": "SW_CORE_01:Gi0/2",
+      "device_id": "SW_CORE_01",
+      "speed_mbps": 1000.0
+    },
+    {
+      "interface_id": "SW_CORE_01:Gi0/3",
+      "device_id": "SW_CORE_01",
+      "speed_mbps": 1000.0
+    },
+    {
+      "interface_id": "SW_CORE_01:Gi0/4",
+      "device_id": "SW_CORE_01",
+      "speed_mbps": 1000.0
+    },
+    {
+      "interface_id": "SW_CORE_01:Gi0/5",
+      "device_id": "SW_CORE_01",
+      "speed_mbps": 1000.0
+    },
+    {
+      "interface_id": "SW_DIST_HOSTEL:uplink",
+      "device_id": "SW_DIST_HOSTEL",
+      "speed_mbps": 1000.0
+    },
+    {
+      "interface_id": "SW_DIST_HOSTEL:Gi0/1",
+      "device_id": "SW_DIST_HOSTEL",
+      "speed_mbps": 1000.0
+    },
+    {
+      "interface_id": "SW_DIST_HOSTEL:Gi0/2",
+      "device_id": "SW_DIST_HOSTEL",
+      "speed_mbps": 1000.0
+    },
+    {
+      "interface_id": "SW_DIST_DEPT:uplink",
+      "device_id": "SW_DIST_DEPT",
+      "speed_mbps": 1000.0
+    },
+    {
+      "interface_id": "SW_DIST_DEPT:Gi0/1",
+      "device_id": "SW_DIST_DEPT",
+      "speed_mbps": 1000.0
+    },
+    {
+      "interface_id": "SW_ACCESS_LAB:uplink",
+      "device_id": "SW_ACCESS_LAB",
+      "speed_mbps": 1000.0
+    },
+    {
+      "interface_id": "AP_HOSTEL_A:eth0",
+      "device_id": "AP_HOSTEL_A",
+      "speed_mbps": 1000.0
+    },
+    {
+      "interface_id": "AP_HOSTEL_A:wlan0",
+      "device_id": "AP_HOSTEL_A",
+      "speed_mbps": 300.0
+    },
+    {
+      "interface_id": "AP_HOSTEL_B:eth0",
+      "device_id": "AP_HOSTEL_B",
+      "speed_mbps": 1000.0
+    },
+    {
+      "interface_id": "SRV_DNS_01:eth0",
+      "device_id": "SRV_DNS_01",
+      "speed_mbps": 1000.0
+    },
+    {
+      "interface_id": "SRV_DHCP_01:eth0",
+      "device_id": "SRV_DHCP_01",
+      "speed_mbps": 1000.0
+    }
+  ],
+  "links": [
+    {
+      "link_id": "LINK_CORE_GW",
+      "source_entity": "SW_CORE_01",
+      "target_entity": "GW_EDGE_01",
+      "source_interface": "SW_CORE_01:Gi0/1",
+      "target_interface": "GW_EDGE_01:eth1",
+      "capacity_mbps": 10000.0,
+      "link_type": "trunk"
+    },
+    {
+      "link_id": "LINK_CORE_HOSTEL",
+      "source_entity": "SW_CORE_01",
+      "target_entity": "SW_DIST_HOSTEL",
+      "source_interface": "SW_CORE_01:Gi0/2",
+      "target_interface": "SW_DIST_HOSTEL:uplink",
+      "capacity_mbps": 1000.0,
+      "link_type": "ethernet"
+    },
+    {
+      "link_id": "LINK_CORE_DEPT",
+      "source_entity": "SW_CORE_01",
+      "target_entity": "SW_DIST_DEPT",
+      "source_interface": "SW_CORE_01:Gi0/3",
+      "target_interface": "SW_DIST_DEPT:uplink",
+      "capacity_mbps": 1000.0,
+      "link_type": "ethernet"
+    },
+    {
+      "link_id": "LINK_CORE_DNS",
+      "source_entity": "SW_CORE_01",
+      "target_entity": "SRV_DNS_01",
+      "source_interface": "SW_CORE_01:Gi0/4",
+      "target_interface": "SRV_DNS_01:eth0",
+      "capacity_mbps": 1000.0,
+      "link_type": "ethernet"
+    },
+    {
+      "link_id": "LINK_CORE_DHCP",
+      "source_entity": "SW_CORE_01",
+      "target_entity": "SRV_DHCP_01",
+      "source_interface": "SW_CORE_01:Gi0/5",
+      "target_interface": "SRV_DHCP_01:eth0",
+      "capacity_mbps": 1000.0,
+      "link_type": "ethernet"
+    },
+    {
+      "link_id": "LINK_HOSTEL_AP_A",
+      "source_entity": "SW_DIST_HOSTEL",
+      "target_entity": "AP_HOSTEL_A",
+      "source_interface": "SW_DIST_HOSTEL:Gi0/1",
+      "target_interface": "AP_HOSTEL_A:eth0",
+      "capacity_mbps": 1000.0,
+      "link_type": "ethernet"
+    },
+    {
+      "link_id": "LINK_HOSTEL_AP_B",
+      "source_entity": "SW_DIST_HOSTEL",
+      "target_entity": "AP_HOSTEL_B",
+      "source_interface": "SW_DIST_HOSTEL:Gi0/2",
+      "target_interface": "AP_HOSTEL_B:eth0",
+      "capacity_mbps": 1000.0,
+      "link_type": "ethernet"
+    },
+    {
+      "link_id": "LINK_DEPT_LAB",
+      "source_entity": "SW_DIST_DEPT",
+      "target_entity": "SW_ACCESS_LAB",
+      "source_interface": "SW_DIST_DEPT:Gi0/1",
+      "target_interface": "SW_ACCESS_LAB:uplink",
+      "capacity_mbps": 1000.0,
+      "link_type": "ethernet"
+    },
+    {
+      "link_id": "LINK_WIFI_ZONE_A",
+      "source_entity": "AP_HOSTEL_A",
+      "target_entity": "HOSTEL_ZONE_A",
+      "source_interface": "AP_HOSTEL_A:wlan0",
+      "target_interface": "HOSTEL_ZONE_A:wlan",
+      "capacity_mbps": 300.0,
+      "link_type": "wireless"
+    }
+  ],
+  "service_dependencies": [
+    {
+      "consumer_entity": "HOSTEL_ZONE_A",
+      "provider_entity": "AP_HOSTEL_A",
+      "dependency_type": "wireless_access"
+    },
+    {
+      "consumer_entity": "AP_HOSTEL_A",
+      "provider_entity": "SW_DIST_HOSTEL",
+      "dependency_type": "uplink"
+    },
+    {
+      "consumer_entity": "SW_DIST_HOSTEL",
+      "provider_entity": "SW_CORE_01",
+      "dependency_type": "uplink"
+    },
+    {
+      "consumer_entity": "SW_DIST_DEPT",
+      "provider_entity": "SW_CORE_01",
+      "dependency_type": "uplink"
+    },
+    {
+      "consumer_entity": "SW_CORE_01",
+      "provider_entity": "GW_EDGE_01",
+      "dependency_type": "default_gateway"
+    },
+    {
+      "consumer_entity": "HOSTEL_ZONE_A",
+      "provider_entity": "SRV_DNS_01",
+      "dependency_type": "dns"
+    },
+    {
+      "consumer_entity": "HOSTEL_ZONE_A",
+      "provider_entity": "SRV_DHCP_01",
+      "dependency_type": "dhcp"
+    }
+  ]
+}

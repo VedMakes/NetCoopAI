@@ -59,11 +59,10 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
       role: 'assistant',
       content:
         "Hello! I am the NetCoop AI Incident Explanation Assistant.\n\nI can explain the certified root cause, specialist tower findings, supporting telemetry evidence, and Evidence Release Gate checks strictly grounded in certified incident artifacts.\n\nHow can I help you understand this incident?",
-      provider: 'deterministic',
+      provider: 'system',
     },
   ]);
   const [inputQuestion, setInputQuestion] = useState('');
-  const [llmMode, setLlmMode] = useState<'off' | 'auto' | 'on'>('auto');
   const [isLoading, setIsLoading] = useState(false);
   const [isLoadingHistory, setIsLoadingHistory] = useState(false);
   const [isClearingHistory, setIsClearingHistory] = useState(false);
@@ -90,7 +89,7 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
         content: sessionId
           ? `This conversation belongs to “${sessionTitle}”. It can explain completed diagnoses in this session and compare results after a new analysis.`
           : 'Create or select an investigation session to start.',
-        provider: 'deterministic',
+        provider: 'system',
       },
     ]);
     setInputQuestion('');
@@ -123,7 +122,7 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
         {
           role: 'assistant',
           content: 'Conversation reset. The completed run reports remain in this session and can still be discussed.',
-          provider: 'deterministic',
+          provider: 'system',
         },
       ]);
     } catch (error) {
@@ -167,7 +166,7 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
     setIsLoading(true);
 
     try {
-      const resp = await askSessionAssistant(requestedSessionId, q, llmMode);
+      const resp = await askSessionAssistant(requestedSessionId, q, 'on');
       if (requestIdRef.current !== requestId) return;
       setMessages((prev) => [
         ...prev,
@@ -235,8 +234,7 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
       <div className="px-5 py-3 border-b border-noc-border/60 bg-noc-bg/40 space-y-2">
         <div className="flex items-center justify-between gap-3 text-[11px]">
           <span className="text-noc-muted">
-            Context: {runs.filter((run) => run.status === 'completed').length} completed run(s)
-            {runs.filter((run) => run.status === 'completed').length > 5 ? ' · using 5 most recent' : ''}
+            Context: {runs.filter((run) => run.status === 'completed').length} completed run(s) · all runs included
           </span>
           <button
             type="button"
@@ -249,7 +247,7 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
           </button>
         </div>
         <p className="text-[10px] leading-relaxed text-noc-muted">
-          Uploading starts a separate analysis in this session. The assistant reopens when it finishes. Chat messages are context only; they are never added as telemetry.
+          Uploading starts a separate analysis in this session. The assistant reopens when it finishes. Your chat messages are retained as unverified session context for follow-up answers, never as telemetry.
         </p>
       </div>
 
@@ -258,37 +256,18 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
           <div className="flex items-center justify-between gap-2">
             <span className="font-semibold text-noc-amethyst">Optional symptom review</span>
             <span className="rounded border border-noc-border px-1.5 py-0.5 text-[10px] uppercase text-noc-muted">
-              {latestSymptomReasoning.status}
+              {latestSymptomReasoning.agent_mode === 'llm_unavailable' ? 'LLM unavailable' : `${latestSymptomReasoning.status} · ${latestSymptomReasoning.agent_mode}`}
             </span>
           </div>
           <p className="mt-1 text-noc-text">“{latestSymptomReasoning.reported_symptom}”</p>
           <p className="mt-1 leading-relaxed text-noc-muted">{latestSymptomReasoning.explanation}</p>
-          <p className="mt-1 text-[10px] text-noc-muted">Compared after diagnosis; it did not steer or change the diagnosis.</p>
+          <p className="mt-1 text-[10px] text-noc-muted">Compared after diagnosis; it did not steer or change the diagnosis. This review requires LLM inference.</p>
         </div>
       )}
 
-      {/* Mode & Environment Bar */}
-      <div className="px-5 py-2.5 bg-noc-bg/60 border-b border-noc-border/60 flex items-center justify-between text-xs">
-        <div className="flex items-center gap-1.5 text-noc-muted">
-          <Cpu className="w-3.5 h-3.5 text-noc-cyan" />
-          <span className="text-[11px]">Provider Mode:</span>
-        </div>
-
-        <div className="flex items-center gap-1 bg-noc-subpanel p-0.5 rounded-lg border border-noc-border text-[11px]">
-          {(['auto', 'off', 'on'] as const).map((mode) => (
-            <button
-              key={mode}
-              onClick={() => setLlmMode(mode)}
-              className={`px-2 py-0.5 rounded capitalize font-medium transition-colors ${
-                llmMode === mode
-                  ? 'bg-indigo-600 text-white shadow-sm'
-                  : 'text-noc-muted hover:text-noc-text'
-              }`}
-            >
-              {mode === 'auto' ? 'Auto LLM' : mode === 'off' ? 'Deterministic' : 'LLM Only'}
-            </button>
-          ))}
-        </div>
+      <div className="px-5 py-2.5 bg-noc-bg/60 border-b border-noc-border/60 flex items-center gap-1.5 text-xs text-noc-muted">
+        <Cpu className="w-3.5 h-3.5 text-noc-cyan" />
+        <span className="text-[11px]">Chat inference: LLM required · no deterministic fallback</span>
       </div>
 
       {/* Suggested Prompt Pills */}
@@ -341,7 +320,7 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
                   <div className="pt-2 border-t border-noc-border/50 flex flex-wrap items-center justify-between gap-2 text-[10px] text-noc-muted font-mono">
                     <span className="flex items-center gap-1">
                       <ShieldCheck className="w-3 h-3 text-noc-emerald" />
-                      <span>{m.provider || 'deterministic'}</span>
+                      <span>{m.provider || 'unknown'}</span>
                     </span>
 
                     <button

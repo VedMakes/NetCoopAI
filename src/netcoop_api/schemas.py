@@ -12,6 +12,7 @@ class ScenarioSummary(BaseModel):
     scenario_id: str
     name: str
     category: str
+    suite: Literal["challenge", "netcoop", "edge"] = "challenge"
     description: str
     fixture_path: str
     symptoms_summary: str

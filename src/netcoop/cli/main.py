@@ -222,7 +222,7 @@ def _soft_status(message: str):
     return console.status(f"[cyan]✦ {message}[/cyan]", spinner="dots")
 
 
-def _run_session_chat(session_id: str, llm_mode: str) -> None:
+def _run_session_chat(session_id: str) -> None:
     """Open the shared session assistant; Ctrl+C closes chat without deleting the session."""
     from netcoop_api.assistant import assistant_service
     from netcoop_api.schemas import AssistantRequest
@@ -235,8 +235,8 @@ def _run_session_chat(session_id: str, llm_mode: str) -> None:
     completed_count = sum(run.status == "completed" for run in session.runs)
     chat_console.print(Panel(
         f"[bold]Session:[/bold] {session.title} · {session_id}\n"
-        f"[bold]Completed runs in context:[/bold] {completed_count} (up to 5 most recent)\n"
-        "Ask about diagnoses, symptoms, evidence, or compare runs. New telemetry must be added with a new triage command.\n"
+        f"[bold]Completed runs in context:[/bold] {completed_count} (all runs included)\n"
+        "Ask about diagnoses, symptoms, evidence, or compare runs. Chat always requires the configured LLM and never substitutes deterministic answers. New telemetry must be added with a new triage command.\n"
         "Type [cyan]/exit[/cyan] or press [cyan]Ctrl+C[/cyan] to close chat; the session remains available in CLI and dashboard.",
         title="NetCoop Session Chat",
         border_style="magenta",
@@ -255,7 +255,7 @@ def _run_session_chat(session_id: str, llm_mode: str) -> None:
         try:
             response = assistant_service.answer_session_question(
                 session_id,
-                AssistantRequest(question=question, llm=llm_mode),
+                AssistantRequest(question=question, llm="on"),
             )
             chat_console.print(Panel(
                 Markdown(response.answer),
@@ -269,7 +269,7 @@ def _run_session_chat(session_id: str, llm_mode: str) -> None:
 @sessions_app.command("chat")
 def chat_session(
     session_id: str | None = typer.Argument(None, help="Session ID; defaults to the selected CLI session."),
-    llm: str = typer.Option("off", "--llm", help="LLM mode for answers: off, auto, or on."),
+    llm: str = typer.Option("on", "--llm", help="Deprecated compatibility option; session chat always requires the LLM."),
 ) -> None:
     """Resume read-only Q&A for a saved investigation session."""
     try:
@@ -284,7 +284,9 @@ def chat_session(
     if llm not in {"off", "auto", "on"}:
         console.print("[bold red]--llm must be off, auto, or on.[/bold red]")
         raise typer.Exit(code=2)
-    _run_session_chat(selected_id, llm)
+    if llm != "on":
+        console.print("[dim]Session chat always requires LLM inference; --llm is ignored.[/dim]")
+    _run_session_chat(selected_id)
 
 
 def _demo_progress() -> Progress:
@@ -921,7 +923,9 @@ def diagnose(
             report = report.model_copy(update={"site_id": site})
             repo.insert_final_report(report)
         if symptom_chat is not None:
-            symptom_agent = SymptomReasoningAgent(llm_mode=llm)
+            # An explicitly requested caller symptom is an inference feature even
+            # when the deterministic diagnostic pipeline itself runs with --llm off.
+            symptom_agent = SymptomReasoningAgent(llm_mode="on")
             if explain:
                 explain_console.print("[bright_cyan]✦ symptom-chat[/bright_cyan]  Running optional symptom comparison after the evidence gate; it cannot change the diagnosis.")
             if format_opt.lower() == "rich":
@@ -970,7 +974,7 @@ def diagnose(
         else:
             sys.stdout.write(output_text + "\n")
         if open_chat:
-            _run_session_chat(selected_session_id, llm)
+            _run_session_chat(selected_session_id)
         return
 
     if format_opt.lower() == "markdown":
@@ -981,7 +985,7 @@ def diagnose(
         else:
             sys.stdout.write(output_text + "\n")
         if open_chat:
-            _run_session_chat(selected_session_id, llm)
+            _run_session_chat(selected_session_id)
         return
 
     # Default: Rich Terminal Display
@@ -1102,7 +1106,7 @@ def diagnose(
         console.print(f"[green]Saved summary report to {output_path}[/green]")
 
     if open_chat:
-        _run_session_chat(selected_session_id, llm)
+        _run_session_chat(selected_session_id)
 
 
 app.command("triage")(diagnose)

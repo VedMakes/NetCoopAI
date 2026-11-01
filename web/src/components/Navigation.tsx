@@ -20,7 +20,7 @@ export const Navigation: React.FC<NavigationProps> = ({ currentTab, onSelectTab,
           }`}
         >
           <Network className="w-4 h-4 text-indigo-400" />
-          <span>Network Simulation & Topology</span>
+          <span>Run a diagnosis</span>
         </button>
 
         <button
@@ -32,17 +32,16 @@ export const Navigation: React.FC<NavigationProps> = ({ currentTab, onSelectTab,
           }`}
         >
           <FileText className="w-4 h-4 text-emerald-400" />
-          <span>Incident Intelligence & Evidence</span>
+          <span>Results & evidence</span>
           {hasIncident && (
             <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 ml-1" />
           )}
         </button>
       </div>
 
-      <div className="text-[11px] text-noc-muted font-mono flex items-center space-x-3">
-        <span>Topology: <strong className="text-noc-cyan">Campus Core</strong></span>
-        <span>•</span>
-        <span>Engine: <strong className="text-noc-amethyst">4 Specialist Towers</strong></span>
+      <div className="hidden items-center gap-2 text-[10px] text-noc-muted sm:flex">
+        <span className="h-1.5 w-1.5 rounded-full bg-noc-green" />
+        <span>4 specialist towers</span><span className="text-noc-border">·</span><span>evidence-gated diagnosis</span>
       </div>
     </nav>
   );

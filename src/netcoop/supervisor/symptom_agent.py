@@ -142,12 +142,16 @@ class SymptomReasoningAgent:
     def __init__(self, provider: SymptomReasoningProvider | None = None, llm_mode: str = "off") -> None:
         load_dotenv()
         mode = llm_mode.casefold()
+        self.require_llm = mode == "on"
         api_key = os.environ.get("OPENROUTER_API_KEY", "")
-        self.provider = provider or (
-            OpenRouterSymptomProvider(api_key=api_key)
-            if mode in {"auto", "on"} and api_key
-            else DeterministicSymptomProvider()
-        )
+        self.provider = provider
+        if self.provider is None:
+            if mode in {"auto", "on"} and api_key:
+                self.provider = OpenRouterSymptomProvider(api_key=api_key)
+            elif self.require_llm:
+                self.provider = None
+            else:
+                self.provider = DeterministicSymptomProvider()
 
     def analyze(
         self,
@@ -158,6 +162,8 @@ class SymptomReasoningAgent:
     ) -> SymptomReasoning:
         """Return a standalone symptom note; failure never changes the diagnosis."""
         try:
+            if self.provider is None:
+                raise RuntimeError("Symptom chat requires OPENROUTER_API_KEY; no model call was made.")
             result = self.provider.analyze(symptom, report, observations, tower_reports)
             weak_support = (
                 report.confidence < 0.7
@@ -179,6 +185,16 @@ class SymptomReasoningAgent:
                 })
             return result
         except Exception as exc:
+            if self.require_llm:
+                logger.warning("Required symptom LLM failed: %s", exc)
+                return SymptomReasoning(
+                    reported_symptom=symptom,
+                    status="unclear",
+                    diagnosed_fault_codes=_diagnosed_fault_codes(report),
+                    explanation="Symptom review is unavailable because the required LLM inference did not complete. The diagnosis remains unchanged.",
+                    agent_mode="llm_unavailable",
+                    warnings=[str(exc)],
+                )
             logger.warning("Symptom context agent failed; using deterministic fallback: %s", exc)
             from netcoop.supervisor.supplementary import reason_about_symptom
 

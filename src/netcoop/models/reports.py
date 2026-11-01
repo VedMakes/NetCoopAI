@@ -137,7 +137,7 @@ class SymptomReasoning(BaseModel):
     diagnosed_fault_codes: list[str] = Field(default_factory=list)
     matched_fault_codes: list[str] = Field(default_factory=list)
     explanation: str
-    agent_mode: Literal["deterministic", "llm", "deterministic_fallback"] = "deterministic"
+    agent_mode: Literal["deterministic", "llm", "deterministic_fallback", "llm_unavailable"] = "deterministic"
     warnings: list[str] = Field(default_factory=list)
 
 

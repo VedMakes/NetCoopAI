@@ -11,7 +11,7 @@ export default {
         noc: {
           bg: '#0B0D14',
           panel: '#121624',
-        card: '#0E1422',
+          card: '#0E1422',
           subpanel: '#1A2035',
           border: '#242C47',
           hover: '#2D375B',
@@ -22,12 +22,15 @@ export default {
           cyan: '#38BDF8',
           amethyst: '#C7A7EF',
           green: '#10B981',
-        emerald: '#10B981',
+          emerald: '#10B981',
           yellow: '#F59E0B',
-        amber: '#F59E0B',
+          amber: '#F59E0B',
           red: '#F43F5E',
           purple: '#A855F7',
         }
+      },
+      boxShadow: {
+        panel: '0 18px 42px rgba(3, 4, 10, 0.28)',
       },
       opacity: {
         15: '0.15',

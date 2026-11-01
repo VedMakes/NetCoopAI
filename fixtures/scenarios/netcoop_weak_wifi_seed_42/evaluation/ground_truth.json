@@ -1,0 +1,20 @@
+{
+  "scenario_id": "SCEN-WEAK_WIFI-01",
+  "incident_id": "INC-SYNTH-WEAK-001",
+  "injected_fault_class": "weak_wifi",
+  "target_entity": "AP_HOSTEL_A",
+  "intended_affected_entities": [
+    "AP_HOSTEL_A",
+    "HOSTEL_ZONE_A"
+  ],
+  "fault_start_step": 4,
+  "fault_start_time": "2026-10-31T12:02:00+00:00",
+  "fault_duration_steps": 8,
+  "severity": "medium",
+  "simulator_metadata": {
+    "seed": 42,
+    "num_steps": 15,
+    "sampling_interval_seconds": 30,
+    "start_time": "2026-10-31T12:00:00+00:00"
+  }
+}

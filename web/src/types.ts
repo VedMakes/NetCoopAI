@@ -2,6 +2,7 @@ export interface ScenarioSummary {
   scenario_id: string;
   name: string;
   category: string;
+  suite: 'challenge' | 'netcoop' | 'edge';
   description: string;
   fixture_path: string;
   symptoms_summary: string;
@@ -224,7 +225,7 @@ export interface SymptomReasoning {
   diagnosed_fault_codes: string[];
   matched_fault_codes: string[];
   explanation: string;
-  agent_mode: 'deterministic' | 'llm' | 'deterministic_fallback';
+  agent_mode: 'deterministic' | 'llm' | 'deterministic_fallback' | 'llm_unavailable';
   warnings: string[];
 }
 
