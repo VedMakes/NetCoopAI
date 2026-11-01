@@ -12,7 +12,7 @@ office-capture/
 
 ```bash
 netcoop triage ./office-capture --site office-east \
-  --symptom "Wi-Fi drops in the second-floor meeting rooms"
+  --symptom-chat "Wi-Fi drops in the second-floor meeting rooms"
 ```
 
 The telemetry file can also be supplied directly. Supported telemetry inputs are JSON, JSONL, CSV, and `.log` files whose contents are JSON Lines (one JSON object per line). A `.log` suffix does not enable parsing arbitrary raw syslog text. A standalone map can be supplied with either `--sitemap` or `--topology`:

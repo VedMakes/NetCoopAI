@@ -1,0 +1,121 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1500" height="930" viewBox="0 0 1500 930" role="img" aria-labelledby="title desc">
+  <title id="title">NetCoop's deterministic specialist towers and efficient agent harness</title>
+  <desc id="desc">Four tall specialist towers contain named deterministic checks for performance, infrastructure, connectivity, and services. A shared evidence foundation feeds all towers. An integration-fabric bridge connects them with typed peer queries and delegated tasks. A supervisor harness above coordinates bounded work, efficient LLM assistance can refine recommendations, and an independent evidence gate checks publication.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#15111f"/><stop offset=".55" stop-color="#211831"/><stop offset="1" stop-color="#17252a"/></linearGradient>
+    <linearGradient id="super" x1="0" y1="0" x2="1" y2="0"><stop stop-color="#473265"/><stop offset=".6" stop-color="#382752"/><stop offset="1" stop-color="#2c2442"/></linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%"><feDropShadow dx="0" dy="9" stdDeviation="9" flood-color="#08060d" flood-opacity=".32"/></filter>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M0 0 10 5 0 10Z" fill="#c09be8"/></marker>
+    <marker id="arrow-teal" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto-start-reverse"><path d="M0 0 10 5 0 10Z" fill="#6fd0b2"/></marker>
+    <style>
+      .title{font:700 31px Inter,Segoe UI,Arial,sans-serif;fill:#fbf7ff}.sub{font:14px Inter,Segoe UI,Arial,sans-serif;fill:#c2b6d2}
+      .head{font:700 16px Inter,Segoe UI,Arial,sans-serif;fill:#fff}.body{font:12px Inter,Segoe UI,Arial,sans-serif;fill:#e0d8e9}.small{font:11px Inter,Segoe UI,Arial,sans-serif;fill:#c3b7d0}.tiny{font:10px Inter,Segoe UI,Arial,sans-serif;fill:#b2a5c0}
+      .tower-body{stroke-width:2}.check{fill:#f8f3ff;font:12px Inter,Segoe UI,Arial,sans-serif}.checkmark{font:700 12px Inter,Segoe UI,Arial,sans-serif}
+    </style>
+  </defs>
+  <rect width="1500" height="930" rx="26" fill="url(#bg)"/>
+  <circle cx="1420" cy="65" r="220" fill="#a268cf" opacity=".07"/><circle cx="75" cy="840" r="200" fill="#4cc6a7" opacity=".055"/>
+  <text x="54" y="58" class="title">Four towers do the network work.</text>
+  <text x="54" y="87" class="sub">Focused deterministic checks below. A bounded supervisor harness above. Evidence-checked decisions at the end.</text>
+
+  <!-- efficient reasoning/control layer above the towers -->
+  <g filter="url(#shadow)">
+    <rect x="62" y="126" width="340" height="144" rx="20" fill="#2a2238" stroke="#765c93" stroke-width="1.4"/>
+    <rect x="82" y="145" width="111" height="24" rx="12" fill="#4d3769"/><text x="137" y="162" text-anchor="middle" class="tiny">EFFICIENT LLM</text>
+    <text x="82" y="197" class="head">Constrained model assist</text>
+    <text x="82" y="220" class="body">Can refine read-only next steps.</text>
+    <text x="82" y="241" class="small">Cannot replace the deterministic diagnosis.</text>
+
+    <rect x="447" y="119" width="655" height="158" rx="22" fill="url(#super)" stroke="#a07ac5" stroke-width="1.5"/>
+    <path d="M470 148h18m-9-9v18" stroke="#dec9f5" stroke-width="2" stroke-linecap="round"/>
+    <text x="504" y="153" class="head">Supervisor + agent harness</text>
+    <text x="471" y="180" class="body">Classifies disagreement · asks for a discriminating measurement</text>
+    <text x="471" y="198" class="small">Ranks targeted tasks · merges evidence · manages budgets</text>
+    <rect x="472" y="215" width="144" height="42" rx="12" fill="#332648" stroke="#755c91"/><text x="544" y="241" text-anchor="middle" class="small">Capability allowlist</text>
+    <rect x="627" y="215" width="144" height="42" rx="12" fill="#332648" stroke="#755c91"/><text x="699" y="241" text-anchor="middle" class="small">Typed task schema</text>
+    <rect x="782" y="215" width="144" height="42" rx="12" fill="#332648" stroke="#755c91"/><text x="854" y="241" text-anchor="middle" class="small">Evidence validation</text>
+    <rect x="937" y="215" width="140" height="42" rx="12" fill="#332648" stroke="#755c91"/><text x="1007" y="241" text-anchor="middle" class="small">Hard budgets</text>
+
+    <rect x="1145" y="126" width="292" height="144" rx="20" fill="#1d514a" stroke="#66b89f" stroke-width="1.5"/>
+    <path d="m1170 164 9 9 20-23" fill="none" stroke="#e1fff4" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="1212" y="169" class="head">Independent evidence gate</text>
+    <text x="1170" y="207" class="body">Checks citations, incident scope,</text>
+    <text x="1170" y="228" class="body">provenance, conflicts and data quality.</text>
+    <text x="1170" y="250" class="small">Rejects weak support; permits abstention.</text>
+  </g>
+  <path d="M402 197h36" fill="none" stroke="#c09be8" stroke-width="2" marker-end="url(#arrow)"/>
+  <path d="M1102 197h35" fill="none" stroke="#6fd0b2" stroke-width="2" marker-end="url(#arrow-teal)"/>
+  <text x="420" y="111" class="tiny">structured context</text><text x="1094" y="111" text-anchor="end" class="tiny">proposal + evidence manifest</text>
+  <path d="M775 277v13H204M775 290H1263" fill="none" stroke="#bb97e2" stroke-width="1.5" stroke-dasharray="5 5"/>
+  <path d="M204 290v13m353-13v13m353-13v13m353-13v13" fill="none" stroke="#bb97e2" stroke-width="1.6"/>
+  <circle cx="204" cy="303" r="4" fill="#d2b5f1"/><circle cx="557" cy="303" r="4" fill="#d2b5f1"/><circle cx="910" cy="303" r="4" fill="#d2b5f1"/><circle cx="1263" cy="303" r="4" fill="#d2b5f1"/>
+
+  <!-- towers: unmistakably vertical structures with roofs, shafts and foundations -->
+  <g filter="url(#shadow)">
+    <!-- Performance tower -->
+    <path d="M61 399 204 303 347 399Z" fill="#32627b" stroke="#77c4e0" stroke-width="2"/>
+    <rect x="77" y="395" width="254" height="302" rx="7" fill="#213b4b" stroke="#77c4e0" class="tower-body"/>
+    <path d="M77 415h254M77 678h254" stroke="#77c4e0" stroke-width="3"/>
+    <path d="M95 394v-17h22v17m28 0v-17h22v17m28 0v-17h22v17m28 0v-17h22v17m28 0v-17h22v17" fill="#32627b" stroke="#77c4e0" stroke-width="2"/>
+    <text x="204" y="371" text-anchor="middle" class="head">PERFORMANCE</text>
+    <text x="99" y="447" class="checkmark" fill="#7ed6f0">✓</text><text x="119" y="447" class="check">Utilization / headroom</text>
+    <text x="99" y="487" class="checkmark" fill="#7ed6f0">✓</text><text x="119" y="487" class="check">Queue drops / packet loss</text>
+    <text x="99" y="527" class="checkmark" fill="#7ed6f0">✓</text><text x="119" y="527" class="check">Retransmits / jitter</text>
+    <text x="99" y="567" class="checkmark" fill="#7ed6f0">✓</text><text x="119" y="567" class="check">Wi-Fi RSSI / SNR</text>
+    <text x="204" y="640" text-anchor="middle" class="tiny">traffic + radio quality</text>
+    <rect x="61" y="694" width="286" height="23" rx="5" fill="#315d73" stroke="#77c4e0" stroke-width="2"/>
+
+    <!-- Infrastructure tower -->
+    <path d="M414 399 557 303 700 399Z" fill="#664678" stroke="#cca2e5" stroke-width="2"/>
+    <rect x="430" y="395" width="254" height="302" rx="7" fill="#382b48" stroke="#cca2e5" class="tower-body"/>
+    <path d="M430 415h254M430 678h254" stroke="#cca2e5" stroke-width="3"/>
+    <path d="M448 394v-17h22v17m28 0v-17h22v17m28 0v-17h22v17m28 0v-17h22v17m28 0v-17h22v17" fill="#664678" stroke="#cca2e5" stroke-width="2"/>
+    <text x="557" y="371" text-anchor="middle" class="head">INFRASTRUCTURE</text>
+    <text x="452" y="447" class="checkmark" fill="#e0b9ff">✓</text><text x="472" y="447" class="check">CPU / memory thresholds</text>
+    <text x="452" y="487" class="checkmark" fill="#e0b9ff">✓</text><text x="472" y="487" class="check">Interface state / flaps</text>
+    <text x="452" y="527" class="checkmark" fill="#e0b9ff">✓</text><text x="472" y="527" class="check">CRC / physical errors</text>
+    <text x="452" y="567" class="checkmark" fill="#e0b9ff">✓</text><text x="472" y="567" class="check">Error-log bursts</text>
+    <text x="557" y="640" text-anchor="middle" class="tiny">device + link health</text>
+    <rect x="414" y="694" width="286" height="23" rx="5" fill="#604374" stroke="#cca2e5" stroke-width="2"/>
+
+    <!-- Connectivity tower -->
+    <path d="M767 399 910 303 1053 399Z" fill="#276557" stroke="#72d0ad" stroke-width="2"/>
+    <rect x="783" y="395" width="254" height="302" rx="7" fill="#203d39" stroke="#72d0ad" class="tower-body"/>
+    <path d="M783 415h254M783 678h254" stroke="#72d0ad" stroke-width="3"/>
+    <path d="M801 394v-17h22v17m28 0v-17h22v17m28 0v-17h22v17m28 0v-17h22v17m28 0v-17h22v17" fill="#276557" stroke="#72d0ad" stroke-width="2"/>
+    <text x="910" y="371" text-anchor="middle" class="head">CONNECTIVITY</text>
+    <text x="805" y="447" class="checkmark" fill="#8ce5c4">✓</text><text x="825" y="447" class="check">Graph reachability</text>
+    <text x="805" y="487" class="checkmark" fill="#8ce5c4">✓</text><text x="825" y="487" class="check">DNS / DHCP path trace</text>
+    <text x="805" y="527" class="checkmark" fill="#8ce5c4">✓</text><text x="825" y="527" class="check">Partitions: complete maps</text>
+    <text x="805" y="567" class="checkmark" fill="#8ce5c4">✓</text><text x="825" y="567" class="check">Three-hop impact candidates</text>
+    <text x="910" y="640" text-anchor="middle" class="tiny">paths + declared topology</text>
+    <rect x="767" y="694" width="286" height="23" rx="5" fill="#245849" stroke="#72d0ad" stroke-width="2"/>
+
+    <!-- Services tower -->
+    <path d="M1120 399 1263 303 1406 399Z" fill="#806235" stroke="#edcb7a" stroke-width="2"/>
+    <rect x="1136" y="395" width="254" height="302" rx="7" fill="#443821" stroke="#edcb7a" class="tower-body"/>
+    <path d="M1136 415h254M1136 678h254" stroke="#edcb7a" stroke-width="3"/>
+    <path d="M1154 394v-17h22v17m28 0v-17h22v17m28 0v-17h22v17m28 0v-17h22v17m28 0v-17h22v17" fill="#806235" stroke="#edcb7a" stroke-width="2"/>
+    <text x="1263" y="371" text-anchor="middle" class="head">SERVICES</text>
+    <text x="1158" y="447" class="checkmark" fill="#f3d992">✓</text><text x="1178" y="447" class="check">DNS latency thresholds</text>
+    <text x="1158" y="487" class="checkmark" fill="#f3d992">✓</text><text x="1178" y="487" class="check">DHCP pool / NAK signals</text>
+    <text x="1158" y="527" class="checkmark" fill="#f3d992">✓</text><text x="1178" y="527" class="check">DNS failure / timeout logs</text>
+    <text x="1158" y="567" class="checkmark" fill="#f3d992">✓</text><text x="1178" y="567" class="check">Configuration drift</text>
+    <text x="1263" y="640" text-anchor="middle" class="tiny">service + config health</text>
+    <rect x="1120" y="694" width="286" height="23" rx="5" fill="#72562e" stroke="#edcb7a" stroke-width="2"/>
+  </g>
+
+  <!-- Cross-tower communication bridge -->
+  <path d="M204 717v23m353-23v23m353-23v23m353-23v23" stroke="#73d1b3" stroke-width="2"/>
+  <circle cx="204" cy="717" r="4" fill="#91e0c8"/><circle cx="557" cy="717" r="4" fill="#91e0c8"/><circle cx="910" cy="717" r="4" fill="#91e0c8"/><circle cx="1263" cy="717" r="4" fill="#91e0c8"/>
+  <rect x="113" y="739" width="1240" height="54" rx="16" fill="#183c3b" stroke="#64b99e" stroke-width="1.5"/>
+  <text x="733" y="762" text-anchor="middle" class="head">INTEGRATION FABRIC · the towers can talk through typed, bounded routes</text>
+  <text x="733" y="781" text-anchor="middle" class="small">event bus  ·  read-only peer queries  ·  supervisor-delegated tasks  ·  versioned artifacts  ·  traceable handoffs</text>
+
+  <!-- Shared evidence foundation -->
+  <rect x="113" y="814" width="1240" height="75" rx="17" fill="#253044" stroke="#6980a3" stroke-width="1.5"/>
+  <path d="M204 814v-25m353 25v-25m353 25v-25m353 25v-25" stroke="#92acd2" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="733" y="844" text-anchor="middle" class="head">SHARED EVIDENCE FOUNDATION</text>
+  <text x="733" y="868" text-anchor="middle" class="body">Normalized observations · source + time provenance · site profile · declared topology · data-quality warnings</text>
+  <text x="54" y="914" class="tiny">The towers are deterministic analyzers. Efficient LLM assistance is constrained to recommendations; the independent gate remains the publication check.</text>
+</svg>

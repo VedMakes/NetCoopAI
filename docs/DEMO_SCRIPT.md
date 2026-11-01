@@ -30,11 +30,11 @@ Walk through the specialist summary, certified root cause, confidence, observed 
 
 ```bash
 uv run netcoop triage fixtures/scenarios/dns_failure \
-  --symptom "Users cannot resolve hostnames" \
+  --symptom-chat "Users cannot resolve hostnames" \
   --format markdown -o dns-report.md
 ```
 
-The symptom cross-check runs after the evidence gate. With the default offline mode it uses conservative local rules; if `--llm auto` or `--llm on` is selected and an OpenRouter key is configured, it can use a separate model call. It never changes the diagnosis. Omit `--symptom` to skip the agent entirely.
+The symptom comparison runs after the evidence gate and requires a configured LLM. It never changes the diagnosis. Omit `--symptom-chat` to skip the optional comparison.
 
 ## 5. Use a separate site map
 
@@ -42,7 +42,7 @@ The symptom cross-check runs after the evidence gate. With the default offline m
 uv run netcoop triage ./office-capture \
   --site office-east \
   --sitemap ./office-east-topology.json \
-  --symptom "Wi-Fi drops in the second-floor meeting rooms"
+  --symptom-chat "Wi-Fi drops in the second-floor meeting rooms"
 ```
 
 The first path is local telemetry or a capture directory. The sitemap is read as topology context; it does not establish causation. See [Local Input Formats](INPUT_FORMATS.md) for the JSON structure and [Network Profiles](NETWORK_PROFILES.md) for site-specific mappings.
