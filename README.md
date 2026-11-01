@@ -1,57 +1,101 @@
+<div align="center">
+
 # NetCoop
 
-NetCoop helps network operators investigate service problems from telemetry they already have. Give it a capture (and, when available, a topology map) and it produces an evidence-linked diagnosis, affected-entity summary, limitations, and next steps.
+### Network troubleshooting with specialist agents, bounded teamwork, and evidence you can audit.
 
-Use the **CLI** for quick local investigations and automation, or the **web dashboard** for a visual workflow with saved sessions, a topology view, and follow-up chat. Both interfaces use the same local session and run data.
+NetCoop turns existing network telemetry into a grounded investigation: what the data suggests, which devices may be involved, what supports that conclusion, and what is still unknown.
 
-> NetCoop analyzes supplied files. It does not connect to routers, switches, access points, or monitoring systems to collect live telemetry.
+<p>
+  <img alt="Python 3.12+" src="https://img.shields.io/badge/Python-3.12%2B-6E5AA6?style=for-the-badge&logo=python&logoColor=white">
+  <img alt="Deterministic core" src="https://img.shields.io/badge/Core-Deterministic-318C78?style=for-the-badge">
+  <img alt="Optional LLM" src="https://img.shields.io/badge/LLM-Optional-C27ADB?style=for-the-badge">
+  <img alt="Evidence checked" src="https://img.shields.io/badge/Reports-Evidence--checked-477DA8?style=for-the-badge">
+</p>
 
-## Pick a way to get started
+[CLI setup](docs/CLI.md) · [Dashboard setup](docs/DASHBOARD.md) · [Input formats](docs/INPUT_FORMATS.md) · [Network profiles](docs/NETWORK_PROFILES.md)
 
-| I want to… | Start here |
+</div>
+
+> **Bring a capture, not a collector.** NetCoop analyzes telemetry files you provide; it does not log in to devices or collect live network data.
+
+## Why NetCoop is different
+
+Many “multi-agent” designs ask several general-purpose models to inspect the same raw data, then hope a debate converges. NetCoop takes a more deliberate route: **four network-domain specialists do focused analysis, a deterministic supervisor controls the investigation, and an independent evidence gate checks the published result.**
+
+That separation is the point. It gives each tower a clear job, lets agents exchange bounded evidence requests, and keeps diagnosis and citations under application control. The optional model path is a constrained assistant to that system—not four extra model calls pretending to be network experts.
+
+<p align="center">
+  <img src="docs/assets/tower-architecture.svg" alt="NetCoop architecture: telemetry is normalized, analyzed by four specialist towers, coordinated by a supervisor, independently checked by an evidence gate, and published as an evidence-backed report." width="100%">
+</p>
+
+### Four towers, one shared investigation
+
+| Specialist | What it looks for |
 | --- | --- |
-| Install and run an investigation in a terminal | [CLI setup and guide](docs/CLI.md) |
+| **Performance** | Interface utilization, queue drops, packet loss, retransmissions, jitter, and supported Wi-Fi RSSI/SNR signals. |
+| **Infrastructure** | Device resource pressure, interface state and errors, and supported system-log indicators. |
+| **Connectivity** | Declared physical paths, partitions when the topology is known to be complete, and possible downstream impact. |
+| **Services** | Supported DNS, DHCP, and other service-health signals, including logical dependencies declared in a map. |
+
+Each tower works from the normalized incident evidence and contributes scoped findings. The integration fabric carries typed events, read-only peer checks, and supervisor-assigned tasks between them. For example, a service finding can trigger a connectivity path check; the request, response, status, and supporting topology references stay visible to the supervisor and in the final record.
+
+### Cooperation without an open-ended agent loop
+
+The supervisor owns incident state, task authorization, evidence merging, conflict handling, and publication. It can ask for a targeted follow-up when evidence may distinguish competing hypotheses. The investigation has explicit defaults: at most **4 supervisor calls**, **2 investigation rounds**, **6 specialist tasks**, **2 peer queries per task**, and **1 gate retry**. When the evidence still does not support a conclusion, NetCoop can abstain.
+
+This is useful orchestration: every extra turn has a bounded purpose, and the runtime tracks whether work fits the budget. It avoids relying on free-form debate as a substitute for measurements.
+
+### Token-conscious by design
+
+The towers are domain-specific deterministic analyzers, not four LLM personas. They perform the broad pass locally. The optional OpenRouter path is considered only after the deterministic supervisor has a supported diagnosis; it receives a structured incident dossier and may refine **bounded, read-only recommendations**. It cannot change the root cause, affected entities, confidence, evidence citations, or an abstention.
+
+That means NetCoop does not need to send every capture through a model just to get specialist coverage. It is a **token-conscious architecture**: deterministic analysis first, selective model assistance where it can help. We have not published a measured token-savings benchmark, and actual usage depends on the capture, model, and enabled options.
+
+<p align="center">
+  <img src="docs/assets/token-efficient-flow.svg" alt="NetCoop performs deterministic specialist analysis first, then optionally sends compact structured context to an LLM for constrained recommendation refinement, with the diagnosis protected by the evidence gate." width="100%">
+</p>
+
+## From capture to an explainable result
+
+1. **Normalize the input.** Read JSON, JSON Lines, or CSV telemetry and an optional JSON topology. Report malformed rows, missing timestamps, unknown metrics, and incompatible units instead of making up values.
+2. **Run focused diagnosis.** Performance, infrastructure, connectivity, and services specialists analyze their domains and exchange bounded checks when useful.
+3. **Resolve or disclose uncertainty.** The supervisor weighs findings, conflicts, and missing measurements; it can request a limited follow-up or abstain.
+4. **Verify before release.** The independent evidence gate checks cited findings, observation provenance, incident scope, data-quality warnings, and orchestration history.
+5. **Report impact carefully.** Reports separate entities supported by observations from topology-inferred impact candidates. Inferred means *predicted*, not confirmed user impact.
+
+Use `netcoop triage ... --explain` to stream the actual workflow as it happens: specialist results, inter-agent handoffs, task choices, evidence provenance, and gate checks. Explanation output shows concise rationale summaries, not private model chain-of-thought. JSON reports remain on stdout; the live explanation goes to stderr.
+
+## Built for different networks
+
+NetCoop accepts common local telemetry exports and lets operators adapt supported flat fields through versioned YAML network profiles. A profile can map source field names, entity aliases, known metrics and units, counter semantics, service roles, topology relationships, anchors, completeness, and supported thresholds—without rewriting tower code.
+
+Profiles are a practical adapter layer, not a magic vendor parser. Unknown metrics need analyzer support, and deeply nested collector formats need an explicit adapter. See [Network profiles](docs/NETWORK_PROFILES.md) and [input and topology formats](docs/INPUT_FORMATS.md) for examples and boundaries.
+
+## Choose your workflow
+
+| Want to… | Guide |
+| --- | --- |
+| Triage a local capture, export JSON/Markdown, or automate a check | [CLI setup and field guide](docs/CLI.md) |
 | Start the API and browser dashboard | [Dashboard setup and guide](docs/DASHBOARD.md) |
-| Check which telemetry and map formats work | [Input formats](docs/INPUT_FORMATS.md) |
-| Adapt NetCoop to a site's field names and conventions | [Network profiles](docs/NETWORK_PROFILES.md) |
-| Run a short demonstration | [Demo walkthrough](docs/DEMO_SCRIPT.md) |
+| Prepare telemetry and a topology map | [Local input formats](docs/INPUT_FORMATS.md) |
+| Run a short presentation | [Demo walkthrough](docs/DEMO_SCRIPT.md) |
 
-## How an investigation works
+Both interfaces can use local investigation sessions. A session can hold multiple runs and an assistant conversation; adding telemetry always requires an explicit new analysis run. Chat text is not telemetry and cannot revise a published diagnosis. The optional `--symptom-chat` comparison also runs **after** the evidence gate, so caller wording cannot steer the diagnostic decision.
 
-1. **Load the capture.** NetCoop reads local JSON, JSON Lines, or CSV telemetry. A JSON topology map is optional. Parsers normalize supported fields and report malformed, missing, or unfamiliar data instead of silently inventing measurements.
-2. **Analyze in specialist domains.** Performance, infrastructure, connectivity, and services specialists inspect the normalized evidence. They can exchange bounded, read-only requests through the integration fabric when a cross-domain check is relevant.
-3. **Coordinate and verify.** The supervisor coordinates investigation tasks and synthesizes candidate causes. An independent evidence gate checks the proposal's evidence references and provenance before a diagnosis is published. If support is insufficient, NetCoop can abstain.
-4. **Explain impact and limits.** The report distinguishes entities directly supported by observations from additional entities inferred through declared topology. It includes evidence, confidence, data limitations, and recommended follow-up checks.
-5. **Continue in a session if useful.** A saved session can contain several analysis runs and a read-only assistant conversation. To add telemetry, explicitly start another run; chat text itself is not treated as telemetry or diagnosis evidence.
+## Straight talk about the results
 
-## What NetCoop can help with
+- A topology map helps reason about paths and potential blast radius. An absent route only supports a partition claim when the map is explicitly complete.
+- `observed` and `inferred` impact are different. Topology-inferred entities are candidates, not proof that users experienced an outage.
+- NetCoop performs no live probes. If a distinguishing signal is missing from the capture, the report should identify that gap.
+- Included scenarios and generated fixtures are synthetic regression checks, not a real-world accuracy estimate. The provided generator uses a fixed topology and a narrow set of injected faults. See [the benchmark notes](docs/CLI.md#try-the-included-cases).
 
-- **Performance specialist:** checks supported signals such as interface utilization, queue drops, packet loss, retransmissions, jitter, and Wi-Fi RSSI/SNR.
-- **Infrastructure specialist:** checks device resource pressure, interface state and errors, and supported system-log indicators.
-- **Connectivity specialist:** uses declared physical links to reason about paths and possible downstream impact. It treats a missing path as meaningful only when the topology is marked complete.
-- **Services specialist:** checks supported DNS, DHCP, and other service-health signals, including logical dependencies declared in a map.
-- **Supervisor and evidence gate:** the supervisor coordinates scoped work and combines specialist proposals. A separate gate verifies evidence references and provenance before release; unsupported proposals can be rejected or abstained.
-- **Agent communication:** specialists can exchange bounded, read-only peer checks through a typed integration fabric. The supervisor can request scoped follow-up analysis. Use the CLI's `--explain` option to watch findings, handoffs, task selection, and gate decisions as a run happens.
-- **Reports and impact:** output includes diagnosis status, confidence, evidence, limitations, recommendations, and separate directly observed versus topology-inferred entities. JSON and Markdown reports are available from the CLI.
-- **Optional symptom comparison:** `--symptom-chat` or the dashboard's symptom field compares a caller's description with the completed diagnosis after the evidence gate. It cannot steer or replace the diagnosis.
-- **Sessions and follow-up:** CLI and dashboard share locally stored sessions. The session assistant can explain completed runs and compare results; it requires an LLM provider and cannot add new telemetry through chat.
+## Get started
 
-Input profiles let an operator map supported telemetry field names, metric names/units, aliases, roles, and topology relationships to NetCoop's canonical format. They do not make arbitrary vendor payloads or new diagnostic metrics work automatically; see [Network profiles](docs/NETWORK_PROFILES.md) for adaptation limits.
+Requirements: Python 3.12 or newer. The dashboard also needs Node.js 18 or newer and npm. Basic deterministic analysis runs locally without an API key; optional model features use OpenRouter.
 
-## Important interpretation notes
-
-- A topology-inferred affected entity is a **predicted impact candidate**, not proof that a user or device was actually affected. Directly observed and inferred impact are reported separately.
-- An absent route is meaningful only when the topology is declared complete. Partial or unknown maps cannot establish a partition just because an edge is missing.
-- A symptom is context for a post-diagnosis comparison, not evidence used to choose the diagnosis.
-- NetCoop does not run live network probes. If a useful signal is absent from the capture, the result should state that limitation rather than claim to have measured it.
-- Built-in scenarios and regression fixtures are synthetic development checks. They do not estimate accuracy on real production networks. See [the benchmark notes](docs/CLI.md#try-the-included-cases) and the input/profile guides for scope and adaptation limits.
-
-## Requirements
-
-- Python 3.12 or newer.
-- For the browser dashboard: Node.js 18 or newer and npm.
-- For LLM-assisted diagnosis, symptom comparison, or session chat: an OpenRouter API key. Core deterministic diagnosis runs locally without a key.
+**Terminal:** follow [CLI setup](docs/CLI.md). **Browser:** follow [dashboard setup](docs/DASHBOARD.md). Setup is intentionally separated so each path stays short and easy to follow.
 
 ## Local data and privacy
 
-Run records, reports, sessions, and assistant turns are stored locally under `data/netcoop/`, which is ignored by Git. LLM features send the information needed for that request to the configured model provider; deterministic diagnosis does not make model API calls. Do not send sensitive production data to an external provider unless your organization's policy allows it.
+Run records, reports, sessions, and assistant turns are stored under the local, Git-ignored `data/netcoop/` directory. Deterministic analysis makes no model API calls. When an LLM feature is used, the context needed for that feature is sent to the configured provider; follow your organization's data policy.
