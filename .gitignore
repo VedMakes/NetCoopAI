@@ -64,4 +64,5 @@ Thumbs.db
 # Frontend Web Build
 web/node_modules/
 web/dist/
+web/.vite/
 
